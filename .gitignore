@@ -1,0 +1,29 @@
+# 1. Environment & Secrets (NEVER COMMIT)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# 2. Virtual Environments
+venv/
+.venv/
+env/
+ENV/
+
+# 3. Python Bytecode & Cache
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+
+# 4. Database & Storage
+*.sqlite3
+*.db
+*.log
+
+# 5. OS Specific
+.DS_Store
+Thumbs.db
