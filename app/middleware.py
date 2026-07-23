@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 def setup_middleware(app: FastAPI) -> None:
     # Define the exact frontend URLs allowed to make API calls to this backend
     origins = [
+        "http://localhost:80",
         "http://localhost:5173",  # Local Vite React frontend
     ]
 

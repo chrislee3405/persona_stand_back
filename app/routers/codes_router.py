@@ -9,7 +9,7 @@ router = APIRouter()
 class CodeSubmission(BaseModel):
     input_code: str
 
-@router.post("/code")
+@router.post("/api/code")
 async def verify_code(payload: CodeSubmission, service: CodeService = Depends()):
     # Call service file 
     processed_result = await service.process_invite_code(payload.input_code)

@@ -1,0 +1,44 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: persona_backend
+    ports:
+      - "8000:8000"
+    environment:
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - .:/app
+      - /app/__pycache__
+    develop:
+      watch:
+        - action: sync
+          path: .
+          target: /app
+          ignore:
+            - .venv
+            - __pycache__
+            - .pytest_cache
+        - action: rebuild
+          path: .requirements.txt
+    networks:
+      - persona_network
+
+  frontend:
+    build:
+      context: ../persona_stand_front
+      dockerfile: Dockerfile
+    container_name: persona_frontend
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+    environment:
+      - VITE_API_URL=http://backend:8000
+    networks:
+      - persona_network
+
+networks:
+  persona_network:
+    driver: bridge
