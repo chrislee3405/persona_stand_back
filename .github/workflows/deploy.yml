@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - trial
 
 permissions:
   id-token: write  # Required for OIDC authentication
