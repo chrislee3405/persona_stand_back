@@ -24,6 +24,7 @@ services:
           path: .requirements.txt
     networks:
       - persona_network
+    restart: unless-stopped
 
   frontend:
     build:
@@ -38,6 +39,7 @@ services:
       - VITE_API_URL=http://backend:8000
     networks:
       - persona_network
+    restart: unless-stopped
 
 networks:
   persona_network:

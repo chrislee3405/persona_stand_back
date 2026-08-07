@@ -1,6 +1,10 @@
 from fastapi import FastAPI
+# #RUN THE DOCKER WEBSAITE IN LOCAL DEVICE
 # .venv\Scripts\activate
 # uvicorn app.main:app --reload
+
+# #IF ACCIDENTIALLY RUN THE WRONG docker-compose.yml IN EC2 
+# docker system prune -f
 
 from app.middleware import setup_middleware
 from app.routers import codes_router, dialogues_router
