@@ -19,6 +19,6 @@ class CodeService:
         )
 
         if result is None:
-            return 'Code not found, you can continue as guest'
+            return None
 
         return result.code

@@ -1,10 +1,35 @@
-from sqlalchemy import Column, Integer, String
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy import Column, Integer, String, Text, ForeignKey, UniqueConstraint, DateTime
+from sqlalchemy.orm import relationship
+from sqlalchemy.sql import func
 from app.database import Base
 
-class UserInput(Base):
+
+class Conversation(Base):
     __tablename__ = "conversation"
 
-    id = Column(Integer, primary_key=True, index=True)
+    conversation_id = Column(String, primary_key=True)  # frontend-generated UUID
     code = Column(String, nullable=True, default="GUEST")
-    content = Column(JSONB, nullable=False)
+    summary = Column(Text, nullable=True)  # running summary, appended every N pairs
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    messages = relationship(
+        "Message",
+        back_populates="conversation",
+        order_by="Message.order_index"
+    )
+
+
+class Message(Base):
+    __tablename__ = "message"
+    __table_args__ = (
+        UniqueConstraint("conversation_id", "order_index", name="uq_conversation_order"),
+    )
+
+    message_id = Column(Integer, primary_key=True, index=True)
+    conversation_id = Column(String, ForeignKey("conversation.conversation_id"), nullable=False, index=True)
+    order_index = Column(Integer, nullable=False)   # 0, 1, 2... strictly increasing per conversation
+    sender = Column(String, nullable=False)          # 'user' | 'backend'
+    text = Column(Text, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    conversation = relationship("Conversation", back_populates="messages")
