@@ -24,6 +24,12 @@ WORKDIR /app
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
+# curl is needed for the HEALTHCHECK below — python:3.11-slim doesn't
+# include it (or wget) by default.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
 # Copy wheels from builder
 COPY --from=builder /app/wheels /wheels
 COPY --from=builder /app/requirements.txt .
