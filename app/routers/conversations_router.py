@@ -1,12 +1,16 @@
 from fastapi import APIRouter, Depends, Request, HTTPException
-from app.services.conversation_service import ConversationService, ConversationNotFoundError
+from app.services.conversation_manage_service import ConversationService, ConversationNotFoundError
+from app.services.model_collarborate_service import ModelCollaborateService
 
 router = APIRouter()
 
 
 @router.post("/api/guestchat")
-async def guestchat(request: Request, service: ConversationService = Depends(ConversationService)):
-    print(">>> BUTTON CLICK EVENT RECEIVED BY BACKEND <<<")
+async def guestchat(
+    request: Request,
+    service: ConversationService = Depends(),
+    ai_service: ModelCollaborateService = Depends()
+):
     body = await request.json()
     conversation_id = body.get("conversationId")  # may be None on first message
     user_text = body.get("text")
@@ -26,8 +30,8 @@ async def guestchat(request: Request, service: ConversationService = Depends(Con
     except ConversationNotFoundError:
         raise HTTPException(status_code=404, detail="conversationId not found")
 
-    # 2. Generate the reply (placeholder — replace with your actual logic).
-    reply_text = f"reach guestchat: {user_text}"
+    # 2. Generate the reply via the AI flow.
+    reply_text = await ai_service.route_user_message(user_text)
 
     # 3. Persist the backend's reply — conversation_id is now guaranteed to exist.
     await service.append_message(
@@ -45,7 +49,11 @@ async def guestchat(request: Request, service: ConversationService = Depends(Con
 
 
 @router.post("/api/invitechat")
-async def invitechat(request: Request, service: ConversationService = Depends(ConversationService)):
+async def invitechat(
+    request: Request,
+    service: ConversationService = Depends(),
+    ai_service: ModelCollaborateService = Depends()
+):
     body = await request.json()
     conversation_id = body.get("conversationId")  # may be None on first message
     user_text = body.get("text")
@@ -67,7 +75,7 @@ async def invitechat(request: Request, service: ConversationService = Depends(Co
     except ConversationNotFoundError:
         raise HTTPException(status_code=404, detail="conversationId not found")
 
-    reply_text = f"reach invitechat: {user_text}"
+    reply_text = await ai_service.route_user_message(user_text)
 
     await service.append_message(
         conversation_id=conversation_id,

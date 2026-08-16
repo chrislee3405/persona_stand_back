@@ -30,6 +30,8 @@ ECR setup and configuration
 EC2 Server Configuration
     - refer to EC2_docker_setup.md
 
+RDS setup and configuration 
+
 # Overall work flow (ongoing steps)
 Local development on docker environment
 

@@ -15,6 +15,7 @@ services:
     volumes:
       - .:/app
       - /app/__pycache__
+      - "C:/Users/user/AppData/Roaming/gcloud/application_default_credentials.json:/app/adc.json:ro"
     develop:
       watch:
         - action: sync

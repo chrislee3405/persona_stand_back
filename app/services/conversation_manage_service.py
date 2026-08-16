@@ -12,14 +12,21 @@ class ConversationNotFoundError(Exception):
 
 
 class ConversationService:
+    """
+    Owns conversation/message storage only — creating conversations,
+    appending messages, retrieving history, updating metadata like the
+    invite code. No AI logic lives here.
+    """
+
     def __init__(self, db: Session = Depends(get_db)):
         self.db = db
 
-    def _get_conversation_locked(self, conversation_id: str) -> conversation_models.Conversation | None:
+    def get_conversation_locked(self, conversation_id: str) -> conversation_models.Conversation | None:
         """
         Looks up an existing conversation and locks the row for the rest of
         this transaction, so two concurrent appends to the same conversation
-        can't race on order_index assignment.
+        can't race on order_index assignment. Public — other services
+        (e.g. SummarizationService) reuse this rather than duplicating it.
         """
         return (
             self.db.query(conversation_models.Conversation)
@@ -29,7 +36,7 @@ class ConversationService:
         )
 
     def _create_conversation(self, code: str | None) -> conversation_models.Conversation:
-        """Backend is the sole authority on conversation_id generation now."""
+        """Backend is the sole authority on conversation_id generation."""
         entry = conversation_models.Conversation(
             conversation_id=str(uuid.uuid4()),
             code=code or "GUEST"
@@ -49,15 +56,10 @@ class ConversationService:
         Persists a message. If conversation_id is None, this is treated as
         the first message of a brand new conversation — one gets created
         and its id is returned. If conversation_id is provided but doesn't
-        match any row, raises ConversationNotFoundError (this should not
-        happen in normal use, since only the backend ever mints ids).
-
-        Returns (message, conversation_id) — conversation_id is echoed back
-        explicitly so callers always know which conversation the message
-        landed in, whether it was newly created or not.
+        match any row, raises ConversationNotFoundError.
         """
         if conversation_id:
-            conversation = self._get_conversation_locked(conversation_id)
+            conversation = self.get_conversation_locked(conversation_id)
             if conversation is None:
                 raise ConversationNotFoundError(conversation_id)
         else:
@@ -93,40 +95,12 @@ class ConversationService:
 
     async def update_conversation_code(self, conversation_id: str, code: str) -> None:
         """
-        Called when a user verifies an invite code mid-conversation — i.e.
-        they already sent some messages as a guest, and the existing
-        conversation row's code is currently "GUEST". Updates it in place
-        to the verified code, rather than creating a new conversation.
- 
-        If conversation_id doesn't match any row (e.g. user verifies a
-        code before sending any message at all, so no conversation exists
-        yet), this is a no-op — there's nothing to update, and that's not
-        an error. The code will simply be sent correctly on their first
-        message via invitechat once a conversation does get created.
+        Called when a user verifies an invite code mid-conversation. Updates
+        the existing conversation's code in place rather than creating a
+        new conversation. No-op if conversation_id doesn't match any row.
         """
-        conversation = self._get_conversation_locked(conversation_id)
+        conversation = self.get_conversation_locked(conversation_id)
         if conversation is None:
             return
         conversation.code = code
         self.db.commit()
-
-
-
-    async def summarize_and_append(self, conversation_id: str, code: str | None, pairs: list) -> None:
-        conversation = self._get_conversation_locked(conversation_id)
-        if conversation is None:
-            raise ConversationNotFoundError(conversation_id)
-
-        new_chunk = await self._generate_summary(pairs, previous_summary=conversation.summary)
-        conversation.summary = (
-            f"{conversation.summary}\n{new_chunk}" if conversation.summary else new_chunk
-        )
-        self.db.commit()
-
-    async def _generate_summary(self, pairs: list, previous_summary: str | None) -> str:
-        """Plug in your actual summarization call here (e.g. Claude API)."""
-        transcript = "\n".join(
-            f"User: {p['user']}\nAssistant: {p['backend']}" for p in pairs
-        )
-        # TODO: replace with a real LLM call
-        raise NotImplementedError("Wire up your summarization model here")
