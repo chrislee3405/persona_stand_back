@@ -19,12 +19,14 @@ class CodeService:
         self.db = db
         self.conversation_service = conversation_service
 
-    async def verify_and_link(self, input_code: str, conversation_id: str | None) -> str:
+    async def match_code(self, input_code: str, conversation_id: str | None, session_id: str) -> str:
         """
         Verifies an invite code, and if it's valid and tied to an existing
         conversation, updates that conversation's code in place instead of
         leaving it stuck on "GUEST". Raises InvalidCodeError if the code
-        doesn't match any stored row.
+        doesn't match any stored row, or ConversationAccessDeniedError
+        (propagated from ConversationService) if the caller's session
+        didn't create the conversation it's trying to upgrade.
         """
         if not input_code.strip():
             raise InvalidCodeError(input_code)
@@ -43,7 +45,8 @@ class CodeService:
         if conversation_id:
             await self.conversation_service.update_conversation_code(
                 conversation_id=conversation_id,
-                code=processed_result
+                code=processed_result,
+                session_id=session_id
             )
 
         return processed_result

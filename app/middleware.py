@@ -1,5 +1,8 @@
+import os
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.sessions import SessionMiddleware
 
 def setup_middleware(app: FastAPI) -> None:
     # Define the exact frontend URLs allowed to make API calls to this backend
@@ -14,4 +17,21 @@ def setup_middleware(app: FastAPI) -> None:
         allow_credentials=True,      # Allows cookies/session tracking if needed later
         allow_methods=["*"],         # Allows GET, POST, OPTIONS, etc.
         allow_headers=["*"],         # Allows headers like Content-Type
+    )
+
+    # Signed, httpOnly session cookie. This is the actual authentication
+    # artifact for every request from here on — the client cannot read or
+    # forge it, unlike a plain value the JS controls. Fail loudly if the
+    # secret isn't configured rather than silently falling back to a
+    # guessable default.
+    session_secret = os.environ["SESSION_SECRET_KEY"]
+    is_prod = os.environ.get("ENV", "development") == "production"
+
+    app.add_middleware(
+        SessionMiddleware,
+        secret_key=session_secret,
+        session_cookie="session",
+        same_site="lax",       # switch to "none" (+ https_only=True) if frontend/backend are on different domains
+        https_only=is_prod,    # True in prod; False only so local http dev still works
+        max_age=60 * 60 * 24 * 30,  # 30 days
     )

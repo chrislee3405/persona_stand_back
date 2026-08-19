@@ -11,6 +11,11 @@ class ConversationNotFoundError(Exception):
     pass
 
 
+class ConversationAccessDeniedError(Exception):
+    """Raised when the caller's session doesn't own the conversation."""
+    pass
+
+
 class ConversationService:
     """
     Owns conversation/message storage only — creating conversations,
@@ -35,11 +40,34 @@ class ConversationService:
             .first()
         )
 
-    def _create_conversation(self, code: str | None) -> conversation_models.Conversation:
+    def assert_ownership(
+        self,
+        conversation: conversation_models.Conversation,
+        session_id: str
+    ) -> None:
+        """
+        Ownership is strictly per-session, for both guest and code-owned
+        conversations: only the session that created a conversation may
+        read or write it. Verifying an invite code only gates whether a
+        session may use /api/invitechat at all (checked at the router
+        level) — it no longer grants access to a conversation created by a
+        *different* session, even one that verified the exact same code.
+
+        Practical consequence: an invite-code user who switches browsers,
+        clears cookies, or lets their session cookie expire loses access
+        to their prior conversations, same as a guest would. If you want
+        that back later, reintroduce a branch here that matches on
+        conversation.code against the session's verified_code instead.
+        """
+        if conversation.owner_session_id != session_id:
+            raise ConversationAccessDeniedError()
+
+    def _create_conversation(self, code: str | None, session_id: str) -> conversation_models.Conversation:
         """Backend is the sole authority on conversation_id generation."""
         entry = conversation_models.Conversation(
             conversation_id=str(uuid.uuid4()),
-            code=code or "GUEST"
+            code=code or "GUEST",
+            owner_session_id=session_id  # recorded even for code-owned convos, for audit/creator tracking
         )
         self.db.add(entry)
         self.db.flush()  # visible in this transaction without committing yet
@@ -49,21 +77,25 @@ class ConversationService:
         self,
         conversation_id: str | None,
         code: str | None,
+        session_id: str,
         sender: str,
         text: str
     ) -> tuple[conversation_models.Message, str]:
         """
         Persists a message. If conversation_id is None, this is treated as
         the first message of a brand new conversation — one gets created
-        and its id is returned. If conversation_id is provided but doesn't
-        match any row, raises ConversationNotFoundError.
+        and its id is returned. If conversation_id is provided, it must
+        both exist AND belong to this exact session (see assert_ownership)
+        — otherwise this raises rather than silently reading/writing
+        someone else's conversation, guest or code-owned alike.
         """
         if conversation_id:
             conversation = self.get_conversation_locked(conversation_id)
             if conversation is None:
                 raise ConversationNotFoundError(conversation_id)
+            self.assert_ownership(conversation, session_id)
         else:
-            conversation = self._create_conversation(code)
+            conversation = self._create_conversation(code, session_id)
 
         next_index = (
             self.db.query(
@@ -85,7 +117,12 @@ class ConversationService:
         return message, conversation.conversation_id
 
     async def get_conversation(self, conversation_id: str) -> list[conversation_models.Message]:
-        """Admin retrieval — always returns messages ordered oldest to newest."""
+        """
+        Admin retrieval — always returns messages ordered oldest to newest.
+        NOT gated by session ownership by design (admins need to read any
+        conversation). Do not expose this on a router without separate
+        admin authentication/authorization in front of it.
+        """
         return (
             self.db.query(conversation_models.Message)
             .filter(conversation_models.Message.conversation_id == conversation_id)
@@ -93,14 +130,23 @@ class ConversationService:
             .all()
         )
 
-    async def update_conversation_code(self, conversation_id: str, code: str) -> None:
+    async def update_conversation_code(
+        self,
+        conversation_id: str,
+        code: str,
+        session_id: str
+    ) -> None:
         """
-        Called when a user verifies an invite code mid-conversation. Updates
-        the existing conversation's code in place rather than creating a
-        new conversation. No-op if conversation_id doesn't match any row.
+        Called when a user verifies an invite code mid-conversation. Only
+        the session that created the (guest) conversation may upgrade it —
+        otherwise anyone who verifies any valid code could hijack an
+        arbitrary conversation_id belonging to someone else, since
+        conversation_id alone was never proof of anything.
         """
         conversation = self.get_conversation_locked(conversation_id)
         if conversation is None:
             return
+        if conversation.owner_session_id != session_id:
+            raise ConversationAccessDeniedError()
         conversation.code = code
         self.db.commit()
