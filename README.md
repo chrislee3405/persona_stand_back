@@ -3,5 +3,3 @@
 # developing next version 0.3.0
 
 # current version 0.2.0
-
-# base version 0.1.0
