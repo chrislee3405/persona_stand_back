@@ -8,19 +8,11 @@ class Conversation(Base):
     __tablename__ = "conversation"
 
     conversation_id = Column(String, primary_key=True)  # backend-generated UUID (see ConversationService)
-    code = Column(String, nullable=True, default="GUEST")
-    summary = Column(Text, nullable=True)  # running summary, appended every N pairs
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-
-    # The session_id (from the signed httpOnly session cookie) that created
-    # this conversation. Used by ConversationService.assert_ownership to
-    # decide who's allowed to read/write it — for guest conversations this
-    # is the sole authorization check; for code-owned conversations it's
-    # kept for audit/creator tracking even though ownership there is
-    # decided by matching verified_code instead. Nullable only so existing
-    # rows created before this column existed don't break; new rows always
-    # set it.
     owner_session_id = Column(String, nullable=True, index=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    code = Column(String, nullable=True, default="GUEST")
+    last_summarized_index = Column(Integer, nullable=False, default=-1)
+    summary = Column(Text, nullable=True)  # running summary, appended every N pairs
 
     messages = relationship(
         "Message",
@@ -43,3 +35,6 @@ class Message(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     conversation = relationship("Conversation", back_populates="messages")
+
+
+    # DROP TABLE IF EXISTS message CASCADE;

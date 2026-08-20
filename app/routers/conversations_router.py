@@ -11,8 +11,8 @@ router = APIRouter()
 @router.post("/api/guestchat")
 async def guestchat(
     request: Request,
-    service: ConversationService = Depends(),
-    ai_service: ModelCollaborateService = Depends()
+    conversation_service: ConversationService = Depends(),
+    model_service: ModelCollaborateService = Depends()
 ):
     session_id = get_or_create_session_id(request)
 
@@ -28,7 +28,7 @@ async def guestchat(
         #    If conversation_id is None, a new conversation is created here,
         #    owned by this session. If it's provided, append_message checks
         #    that this session actually owns it before touching anything.
-        _, conversation_id = await service.append_message(
+        _, conversation_id = await conversation_service.append_message(
             conversation_id=conversation_id,
             code=None,  # guest chat has no code
             session_id=session_id,
@@ -42,12 +42,13 @@ async def guestchat(
         # a conversation_id they don't own actually exists.
         raise HTTPException(status_code=404, detail="conversationId not found")
 
-    # 2. Generate the reply via the AI flow.
-    reply_text = await ai_service.route_user_message(user_text)
+    # 2. Generate the reply via the AI flow. conversation_id is now
+    #    guaranteed to exist and be owned by this session, so
+    #    route_user_message can safely pull recent history for it.
+    reply_text = await model_service.route_user_message(user_text, conversation_id)
 
-    # 3. Persist the backend's reply — conversation_id is now guaranteed to exist
-    #    and to be owned by this session.
-    await service.append_message(
+    # 3. Persist the backend's reply.
+    await conversation_service.append_message(
         conversation_id=conversation_id,
         code=None,
         session_id=session_id,
@@ -65,8 +66,8 @@ async def guestchat(
 @router.post("/api/invitechat")
 async def invitechat(
     request: Request,
-    service: ConversationService = Depends(),
-    ai_service: ModelCollaborateService = Depends()
+    conversation_service: ConversationService = Depends(),
+    model_service: ModelCollaborateService = Depends()
 ):
     session_id = get_or_create_session_id(request)
     verified_code = get_verified_code(request)
@@ -84,7 +85,7 @@ async def invitechat(
         raise HTTPException(status_code=400, detail="text is required")
 
     try:
-        _, conversation_id = await service.append_message(
+        _, conversation_id = await conversation_service.append_message(
             conversation_id=conversation_id,
             code=verified_code,
             session_id=session_id,
@@ -96,9 +97,9 @@ async def invitechat(
     except ConversationAccessDeniedError:
         raise HTTPException(status_code=404, detail="conversationId not found")
 
-    reply_text = await ai_service.route_user_message(user_text)
+    reply_text = await model_service.route_user_message(user_text, conversation_id)
 
-    await service.append_message(
+    await conversation_service.append_message(
         conversation_id=conversation_id,
         code=verified_code,
         session_id=session_id,

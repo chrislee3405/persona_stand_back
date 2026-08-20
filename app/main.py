@@ -1,18 +1,18 @@
+import logging
+import os
+
 from fastapi import FastAPI
-# #RUN THE APP LOCALALLY WITHOUT DOCKER
-# .venv\Scripts\activate
-# uvicorn app.main:app --reload
-
-# # UPDATE THE APP VERSION IN DOCKER
-# docker compose -f docker-compose.yml up --build
-
-
-# #IF ACCIDENTIALLY RUN THE WRONG docker-compose.yml IN EC2 
-# docker system prune -f
 
 from app.middleware import setup_middleware
 from app.routers import codes_router, conversations_router
 from app.database import engine, Base
+
+
+logging.basicConfig(
+    level=logging.DEBUG if os.environ.get("ENV", "development") != "production" else logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+)
+
 
 Base.metadata.create_all(bind=engine) # create tables in models folder if they don't exist in db
 
