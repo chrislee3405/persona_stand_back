@@ -5,6 +5,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 
 def setup_middleware(app: FastAPI) -> None:
+    """
+    Attaches CORS and signed-session-cookie middleware to the FastAPI app.
+
+    Parameters:
+    - app (FastAPI): the application instance — comes from app/main.py at startup
+
+    Returns:
+    - None: configures `app` in place by registering CORSMiddleware and SessionMiddleware
+    """
     # Define the exact frontend URLs allowed to make API calls to this backend
     origins = [
         "http://localhost:80",

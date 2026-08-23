@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException, Depends, status, Request
 from pydantic import BaseModel
 
 from app.services.code_service import CodeService, InvalidCodeError
-from app.services.conversation_manage_service import ConversationAccessDeniedError
+from app.services.conversation_manage_service import ConversationAccessDeniedError, ConversationCodeAlreadyLinkedError
 from app.dependencies.session import get_or_create_session_id
 
 
@@ -18,6 +18,17 @@ async def verify_code(
     request: Request,
     service: CodeService = Depends()
 ):
+    """
+    Handles POST /api/code: verifies a submitted invite code and marks the session as verified.
+
+    Parameters:
+    - payload (CodeSubmission): input_code and optional conversation_id — comes from the request body
+    - request (Request): the incoming request — comes from FastAPI, used to read/write the session cookie
+    - service (CodeService): looks up the code and links it to a conversation — injected by FastAPI
+
+    Returns:
+    - dict: status, the submitted code, and the matched result — sent back to the client as the JSON response
+    """
     session_id = get_or_create_session_id(request)
 
     try:
@@ -37,6 +48,11 @@ async def verify_code(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="cannot link code to a conversation this session doesn't own"
+        )
+    except ConversationCodeAlreadyLinkedError:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="conversation is already linked to a different invite code"
         )
 
     # This is the actual authorization event. Every /api/invitechat call

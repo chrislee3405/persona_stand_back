@@ -1,74 +1,67 @@
-from fastapi import APIRouter, Depends, Request, HTTPException
-from app.services.conversation_manage_service import (
-    ConversationService, ConversationNotFoundError, ConversationAccessDeniedError
-)
-from app.services.model_collarborate_service import ModelCollaborateService
+from fastapi import APIRouter, BackgroundTasks, Depends, Request, HTTPException
+from app.services.conversation_manage_service import ConversationNotFoundError, ConversationAccessDeniedError
+from app.services.chat_service import ChatService
 from app.dependencies.session import get_or_create_session_id, get_verified_code
+from app.validators.chat_validator import ChatMessageCreate
 
 router = APIRouter()
 
 
 @router.post("/api/guestchat")
 async def guestchat(
+    payload: ChatMessageCreate,
     request: Request,
-    conversation_service: ConversationService = Depends(),
-    model_service: ModelCollaborateService = Depends()
+    background_tasks: BackgroundTasks,
+    chat_service: ChatService = Depends()
 ):
+    """
+    Handles POST /api/guestchat: routes a guest user's message to ChatService and maps its errors to HTTP responses.
+
+    Parameters:
+    - payload (ChatMessageCreate): conversationId and text — comes from the validated request body
+    - request (Request): the incoming request — comes from FastAPI, used to read/write the session cookie
+    - background_tasks (BackgroundTasks): task queue — comes from FastAPI, passed through to ChatService
+    - chat_service (ChatService): persists the message, generates the AI reply, and schedules summarization — injected by FastAPI
+
+    Returns:
+    - dict: reply text, sender, and conversationId — sent back to the client as the JSON response
+    """
     session_id = get_or_create_session_id(request)
 
-    body = await request.json()
-    conversation_id = body.get("conversationId")  # may be None on first message
-    user_text = body.get("text")
-
-    if not user_text:
-        raise HTTPException(status_code=400, detail="text is required")
-
     try:
-        # 1. Persist the user's message immediately.
-        #    If conversation_id is None, a new conversation is created here,
-        #    owned by this session. If it's provided, append_message checks
-        #    that this session actually owns it before touching anything.
-        _, conversation_id = await conversation_service.append_message(
-            conversation_id=conversation_id,
-            code=None,  # guest chat has no code
+        return await chat_service.handle_chat_turn(
             session_id=session_id,
-            sender="user",
-            text=user_text
+            code=None,  # guest chat has no code
+            conversation_id=payload.conversationId,
+            user_text=payload.text,
+            background_tasks=background_tasks
         )
     except ConversationNotFoundError:
         raise HTTPException(status_code=404, detail="conversationId not found")
     except ConversationAccessDeniedError:
-        # Same response as "not found" — don't confirm to an attacker that
-        # a conversation_id they don't own actually exists.
+        # Same response — don't give info that a conversation_id actually exists.
         raise HTTPException(status_code=404, detail="conversationId not found")
-
-    # 2. Generate the reply via the AI flow. conversation_id is now
-    #    guaranteed to exist and be owned by this session, so
-    #    route_user_message can safely pull recent history for it.
-    reply_text = await model_service.route_user_message(user_text, conversation_id)
-
-    # 3. Persist the backend's reply.
-    await conversation_service.append_message(
-        conversation_id=conversation_id,
-        code=None,
-        session_id=session_id,
-        sender="backend",
-        text=reply_text
-    )
-
-    return {
-        "text": reply_text,
-        "sender": "backend",
-        "conversationId": conversation_id  # frontend captures this on first message
-    }
 
 
 @router.post("/api/invitechat")
 async def invitechat(
+    payload: ChatMessageCreate,
     request: Request,
-    conversation_service: ConversationService = Depends(),
-    model_service: ModelCollaborateService = Depends()
+    background_tasks: BackgroundTasks,
+    chat_service: ChatService = Depends()
 ):
+    """
+    Handles POST /api/invitechat: routes a verified user's message to ChatService and maps its errors to HTTP responses.
+
+    Parameters:
+    - payload (ChatMessageCreate): conversationId and text — comes from the validated request body
+    - request (Request): the incoming request — comes from FastAPI, used to read the session cookie
+    - background_tasks (BackgroundTasks): task queue — comes from FastAPI, passed through to ChatService
+    - chat_service (ChatService): persists the message, generates the AI reply, and schedules summarization — injected by FastAPI
+
+    Returns:
+    - dict: reply text, sender, and conversationId — sent back to the client as the JSON response
+    """
     session_id = get_or_create_session_id(request)
     verified_code = get_verified_code(request)
 
@@ -77,38 +70,15 @@ async def invitechat(
         # longer accepted here, so this is the only way in.
         raise HTTPException(status_code=401, detail="invite code not verified for this session")
 
-    body = await request.json()
-    conversation_id = body.get("conversationId")  # may be None on first message
-    user_text = body.get("text")
-
-    if not user_text:
-        raise HTTPException(status_code=400, detail="text is required")
-
     try:
-        _, conversation_id = await conversation_service.append_message(
-            conversation_id=conversation_id,
-            code=verified_code,
+        return await chat_service.handle_chat_turn(
             session_id=session_id,
-            sender="user",
-            text=user_text
+            code=verified_code,
+            conversation_id=payload.conversationId,
+            user_text=payload.text,
+            background_tasks=background_tasks
         )
     except ConversationNotFoundError:
         raise HTTPException(status_code=404, detail="conversationId not found")
     except ConversationAccessDeniedError:
         raise HTTPException(status_code=404, detail="conversationId not found")
-
-    reply_text = await model_service.route_user_message(user_text, conversation_id)
-
-    await conversation_service.append_message(
-        conversation_id=conversation_id,
-        code=verified_code,
-        session_id=session_id,
-        sender="backend",
-        text=reply_text
-    )
-
-    return {
-        "text": reply_text,
-        "sender": "backend",
-        "conversationId": conversation_id
-    }

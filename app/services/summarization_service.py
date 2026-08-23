@@ -9,11 +9,8 @@ from app.services.ai.gemini_service import GeminiService
 
 logger = logging.getLogger(__name__)
 
-# Static instruction only — no user-originated content in the system
-# channel. The past summary and recent messages are both derived from
-# raw user input, so they go in the user prompt instead (see
-# _USER_PROMPT_TEMPLATE), consistent with the same split applied in
-# model_collarborate_service.generate_dialogue.
+RECENT_MESSAGES_BEFORE_SUMMARIZE = 10
+
 _SYSTEM_PROMPT = (
     "Generate an updated summary of the conversation, based on the past "
     "conversation summary and the recent messages that came after it "
@@ -31,19 +28,68 @@ class SummarizationService:
 
     def __init__(self, db: Session = Depends(get_db), conversation_service: ConversationService = Depends(), gemini_service: GeminiService = Depends()):
         """
-        Store the injected database session, ConversationService, and GeminiService instances onto the SummarizationService instance attributes.
-        Params: db (Session), conversation_service (ConversationService), gemini_service (GeminiService)
-        Returns: None
+        Stores the injected database session and service instances.
+
+        Parameters:
+        - db (Session): SQLAlchemy session — injected by FastAPI via get_db
+        - conversation_service (ConversationService): reads/updates conversation state — injected by FastAPI
+        - gemini_service (GeminiService): calls the Gemini model — injected by FastAPI
+
+        Returns:
+        - None: sets self.db, self.conversation_service, self.gemini_service
         """
         self.db = db
         self.conversation_service = conversation_service
         self.gemini_service = gemini_service
 
+    async def summarize_conversation_if_needed(self, conversation_id: str) -> None:
+        """
+        Fetches the current summary and recent messages for a conversation and checks whether it needs summarizing.
+
+        Parameters:
+        - conversation_id (str): the conversation to check — comes from conversations_router, scheduled as a background task
+
+        Returns:
+        - None: delegates to summarize_if_needed, which may update the conversation's summary in the database
+        """
+        conversation = self.conversation_service.get_conversation_unlocked(conversation_id)
+        summary = conversation.summary if conversation else None
+        recent_messages = await self.conversation_service.get_recent_messages(
+            conversation_id, exclude_last=False
+        )
+
+        await self.summarize_if_needed(
+            conversation_id=conversation_id,
+            summary=summary,
+            recent_messages=recent_messages
+        )
+
+    async def summarize_if_needed(self, conversation_id: str, summary: str | None, recent_messages: list) -> None:
+        """
+        Triggers summarization once recent messages reach the configured threshold.
+
+        Parameters:
+        - conversation_id (str): the conversation being checked — comes from summarize_conversation_if_needed
+        - summary (str | None): the current summary — comes from summarize_conversation_if_needed
+        - recent_messages (list): messages since the last summary — comes from summarize_conversation_if_needed
+
+        Returns:
+        - None: delegates to summarize_conversation when the threshold (RECENT_MESSAGES_BEFORE_SUMMARIZE) is met
+        """
+        if len(recent_messages) >= RECENT_MESSAGES_BEFORE_SUMMARIZE:
+            await self.summarize_conversation(conversation_id, summary, recent_messages)
+
     async def summarize_conversation(self, conversation_id: str, summary: str | None, recent_messages: list) -> None:
         """
-        Use the conversation's existing summary and its recent messages from the database message table to generate an updated summary via Gemini, then write that summary and reset the last_summarized_index checkpoint on the matching row in the database conversation table.
-        Params: conversation_id (str), summary (str | None), recent_messages (list)
-        Returns: None
+        Generates an updated summary via Gemini and persists it as the conversation's new checkpoint.
+
+        Parameters:
+        - conversation_id (str): the conversation to summarize — comes from summarize_if_needed
+        - summary (str | None): the prior summary, if any — comes from summarize_if_needed
+        - recent_messages (list): messages to fold into the summary — comes from summarize_if_needed
+
+        Returns:
+        - None: stores the updated summary and checkpoint via ConversationService.mark_summarized_up_to
         """
         if not recent_messages:
             return
@@ -54,7 +100,7 @@ class SummarizationService:
         )
 
         messages_section = "\n".join(
-            f"{'User' if m.sender == 'user' else 'Assistant'}: {m.text}"
+            f"{'User' if m.sender == 'user' else 'model'}: {m.text}"
             for m in recent_messages
         )
 
@@ -63,18 +109,11 @@ class SummarizationService:
             messages_section=messages_section
         )
 
-        logger.debug("=== Gemini call: summarize_conversation ===")
-        logger.debug("System prompt: %s", _SYSTEM_PROMPT)
-        logger.debug("User prompt: %s", user_prompt)
-
         updated_summary = self.gemini_service.call_model(
             model_name="gemini-2.5-flash",
             user_prompt=user_prompt,
             system_prompt=_SYSTEM_PROMPT
         )
-
-        logger.debug("Model response: %s", updated_summary)
-        logger.debug("=== End Gemini call ===")
 
         newest_index = recent_messages[-1].order_index
         await self.conversation_service.mark_summarized_up_to(

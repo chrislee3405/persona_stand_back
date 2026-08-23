@@ -20,15 +20,13 @@ _STOP_WORDS_PATH = os.path.join(
 
 def _load_stop_words(path: str = _STOP_WORDS_PATH) -> frozenset:
     """
-    Loads the same way the original assignment's __main__ block did:
-    comma-separated terms in one file.
+    Loads the stop-word list used to filter out common terms during BM25 scoring.
 
-    No silent fallback here on purpose: a missing or unreadable stopword
-    file is a deployment bug, not something to paper over with a
-    different list that would quietly change every score without anyone
-    noticing. Fail at import time (app startup) instead — same principle
-    as SESSION_SECRET_KEY failing loudly if unset, rather than falling
-    back to something weaker.
+    Parameters:
+    - path (str): path to the comma-separated stop-words file — defaults to _STOP_WORDS_PATH
+
+    Returns:
+    - frozenset: the loaded stop words — goes into _DEFAULT_STOP_WORDS, used by every BM25Service instance
     """
     try:
         with open(path, "r") as f:
@@ -52,8 +50,13 @@ _DEFAULT_STOP_WORDS = _load_stop_words()
 
 def process_line(line: str) -> str:
     """
-    Reused verbatim from the original assignment's process_line: strips
-    <p>/</p> tags, removes digits, and replaces punctuation with spaces.
+    Strips <p>/</p> tags, removes digits, and replaces punctuation with spaces in a line of text.
+
+    Parameters:
+    - line (str): raw text — comes from _extract_terms
+
+    Returns:
+    - str: the cleaned line — goes to _extract_terms for tokenization
     """
     line = line.replace("<p>", "").replace("</p>", "")
     line = line.translate(str.maketrans('', '', string.digits)).translate(
@@ -64,12 +67,14 @@ def process_line(line: str) -> str:
 
 def _extract_terms(text: str, stop_words: frozenset) -> list[str]:
     """
-    Same per-term pipeline as the assignment's docParser/queryParser inner
-    loop: process_line -> split -> lowercase -> Porter2 stem -> drop terms
-    of length <= 2 or in the stop word list. Kept as one shared helper
-    since the original applied the exact same steps to both documents and
-    queries (queryParser is literally docParser's inner loop applied to
-    one string instead of a file).
+    Tokenizes text into stemmed, filtered terms for BM25 scoring.
+
+    Parameters:
+    - text (str): raw text to tokenize — comes from find_similar_questions (a question or the user's message)
+    - stop_words (frozenset): words to exclude — comes from BM25Service.stop_words
+
+    Returns:
+    - list[str]: stemmed terms, length > 2 and not stop words — goes to _term_freqs / find_similar_questions
     """
     processed = process_line(text.strip())
     terms = []
@@ -81,6 +86,15 @@ def _extract_terms(text: str, stop_words: frozenset) -> list[str]:
 
 
 def _term_freqs(terms: list[str]) -> dict[str, int]:
+    """
+    Counts how many times each term occurs in a list of terms.
+
+    Parameters:
+    - terms (list[str]): terms to count — comes from _extract_terms
+
+    Returns:
+    - dict[str, int]: term to occurrence count — goes to _bm25_score / find_similar_questions
+    """
     freqs: dict[str, int] = {}
     for term in terms:
         freqs[term] = freqs.get(term, 0) + 1
@@ -89,8 +103,13 @@ def _term_freqs(terms: list[str]) -> dict[str, int]:
 
 def _document_frequency(term_freq_list: list[dict[str, int]]) -> dict[str, int]:
     """
-    Reused from the assignment's df(): for each term, how many documents
-    (not occurrences) contain it at least once.
+    Counts how many documents each term appears in at least once.
+
+    Parameters:
+    - term_freq_list (list[dict[str, int]]): per-document term frequency maps — comes from find_similar_questions
+
+    Returns:
+    - dict[str, int]: term to document count — goes to _compute_idf
     """
     df_dict: dict[str, int] = {}
     for term_freqs in term_freq_list:
@@ -101,19 +120,15 @@ def _document_frequency(term_freq_list: list[dict[str, int]]) -> dict[str, int]:
 
 def _compute_idf(df_dict: dict[str, int], ndocs: int, epsilon: float = 0.25) -> dict[str, float]:
     """
-    Precomputes IDF per term, with a floor for terms whose raw IDF would
-    be negative. The textbook Robertson-Sparck-Jones IDF used in the
-    original assignment goes negative when a term appears in MORE than
-    half the corpus — harmless in a large document collection (rare),
-    but a real problem here: QuestionBank is a small table, so a common
-    word appearing in just over half the stored questions is completely
-    plausible, and a negative IDF term SUBTRACTS from the score instead
-    of adding, actively penalizing documents for containing a query word.
+    Computes per-term IDF weights, flooring negative values so common terms don't penalize scores.
 
-    Standard fix (same approach rank_bm25 and most production BM25
-    implementations use): replace any negative raw IDF with
-    epsilon * average_idf_across_vocabulary, so common terms contribute
-    a small positive weight instead of a penalty.
+    Parameters:
+    - df_dict (dict[str, int]): term to document frequency — comes from _document_frequency
+    - ndocs (int): total number of documents in the corpus — comes from find_similar_questions
+    - epsilon (float): floor multiplier applied to the average IDF — defaults to 0.25
+
+    Returns:
+    - dict[str, float]: term to IDF weight — goes to _bm25_score via find_similar_questions
     """
     raw_idf = {}
     for term, n_i in df_dict.items():
@@ -138,18 +153,20 @@ def _bm25_score(
     b: float = 0.4
 ) -> float:
     """
-    Same BM25 formula shape as the assignment's bm25() (k1/k2 defaults
-    match the original), but b is lowered from the assignment's 0.75 to
-    0.4. b controls how harshly document-length differences are
-    normalized — 0.75 was tuned for a large newspaper-article corpus
-    with genuinely long, variable-length documents. QuestionBank entries
-    are all short and roughly similar length, where near-full
-    normalization over-penalizes a question that's just a couple of
-    words longer for no meaningful reason. k2 is left untouched: it only
-    affects terms where the QUERY itself repeats a word (qf_i > 1), which
-    essentially never happens with short user messages — for qf_i == 1
-    the k2 term is always exactly 1.0 regardless of k2's value, so it has
-    no practical effect on this use case either way.
+    Computes the BM25 relevance score of one document against one query.
+
+    Parameters:
+    - query_term_freqs (dict[str, int]): query term counts — comes from find_similar_questions
+    - doc_term_freqs (dict[str, int]): document term counts — comes from find_similar_questions
+    - doc_size (int): number of terms in the document — comes from find_similar_questions
+    - avg_doc_length (float): average document length across the corpus — comes from find_similar_questions
+    - idf_dict (dict[str, float]): term to IDF weight — comes from _compute_idf
+    - k1 (float): term frequency saturation constant — defaults to 1.2
+    - k2 (float): query term frequency saturation constant — defaults to 100
+    - b (float): document length normalization constant — defaults to 0.4
+
+    Returns:
+    - float: the BM25 score — goes to find_similar_questions for ranking
     """
     if avg_doc_length == 0:
         return 0.0
@@ -185,10 +202,28 @@ class BM25Service:
     """
 
     def __init__(self, db: Session = Depends(get_db)):
+        """
+        Stores the injected database session and default stop-word set.
+
+        Parameters:
+        - db (Session): SQLAlchemy session — injected by FastAPI via get_db
+
+        Returns:
+        - None: sets self.db and self.stop_words
+        """
         self.db = db
         self.stop_words = _DEFAULT_STOP_WORDS
 
     def _load_all(self) -> list[question_bank_models.QuestionBank]:
+        """
+        Fetches every row from the question_bank table.
+
+        Parameters:
+        - none
+
+        Returns:
+        - list[QuestionBank]: all question_bank rows — goes to find_similar_questions
+        """
         return self.db.query(question_bank_models.QuestionBank).all()
 
     def find_similar_questions(
@@ -198,13 +233,15 @@ class BM25Service:
         min_score: float = 0.0
     ) -> list[dict]:
         """
-        Returns up to top_k QuestionBank rows ranked by BM25 score against
-        user_message, each as {topic, question, answer, score}.
+        Ranks question_bank rows by BM25 score against a user message and returns the top matches.
 
-        min_score defaults to 0.0 rather than a guessed positive cutoff —
-        BM25 scores aren't bounded to a fixed range; their scale depends on
-        corpus size and term rarity. Log real scores against your actual
-        question set (debug log below) before picking a real threshold.
+        Parameters:
+        - user_message (str): the text to match against — comes from the caller (e.g. ModelCollaborateService)
+        - top_k (int): maximum number of results to return — defaults to 3
+        - min_score (float): minimum score to include a result — defaults to 0.0
+
+        Returns:
+        - list[dict]: up to top_k matches as {topic, question, answer, score} — goes to the caller (e.g. ModelCollaborateService._gather_context_materials)
         """
         rows = self._load_all()
         if not rows:

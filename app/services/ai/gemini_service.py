@@ -24,11 +24,34 @@ class GeminiService:
     """
 
     def call_model(self, model_name: str, user_prompt: str, system_prompt: str | None = None) -> str:
+        """
+        Sends a prompt to a Gemini model and returns its free-text response.
+
+        Parameters:
+        - model_name (str): which Gemini model to call — comes from the caller (e.g. ModelCollaborateService, SummarizationService)
+        - user_prompt (str): the prompt content — comes from the caller
+        - system_prompt (str | None): optional system instruction — comes from the caller
+
+        Returns:
+        - str: the model's generated text — goes back to the calling service
+        """
         model = GenerativeModel(model_name, system_instruction=system_prompt)
         response = model.generate_content(contents=user_prompt)
         return response.text
 
     def call_model_structured(self, model_name: str, user_prompt: str, system_prompt: str, schema: dict) -> JSONValue:
+        """
+        Sends a prompt to a Gemini model and parses its response as JSON matching the given schema.
+
+        Parameters:
+        - model_name (str): which Gemini model to call — comes from the caller (e.g. ModelCollaborateService.find_topic)
+        - user_prompt (str): the prompt content — comes from the caller
+        - system_prompt (str): system instruction — comes from the caller
+        - schema (dict): the expected response JSON schema — comes from the caller
+
+        Returns:
+        - JSONValue: the parsed JSON response, shaped by `schema` — goes back to the calling service
+        """
         model = GenerativeModel(model_name, system_instruction=system_prompt)
         response = model.generate_content(
             contents=user_prompt,
