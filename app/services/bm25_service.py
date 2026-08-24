@@ -241,7 +241,7 @@ class BM25Service:
         - min_score (float): minimum score to include a result — defaults to 0.0
 
         Returns:
-        - list[dict]: up to top_k matches as {topic, question, answer, score} — goes to the caller (e.g. ModelCollaborateService._gather_context_materials)
+        - list[dict]: up to top_k matches as {question, answer, score} — goes to the caller (e.g. ModelCollaborateService._gather_context_materials)
         """
         rows = self._load_all()
         if not rows:
@@ -276,7 +276,7 @@ class BM25Service:
         logger.debug(
             "BM25 scores for %r: %s",
             user_message,
-            [(row.topic, round(score, 4)) for row, score in scored]
+            [(row.id, round(score, 4)) for row, score in scored]
         )
 
         results = []
@@ -284,7 +284,6 @@ class BM25Service:
             if score < min_score:
                 break
             results.append({
-                "topic": row.topic,
                 "question": row.question,
                 "answer": row.answer,
                 "score": score

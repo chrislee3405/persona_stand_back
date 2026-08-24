@@ -39,4 +39,3 @@ class Message(Base):
     conversation = relationship("Conversation", back_populates="messages")
 
 
-    # DROP TABLE IF EXISTS message CASCADE;

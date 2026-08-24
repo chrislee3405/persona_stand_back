@@ -11,17 +11,60 @@ from app.models import reference_doc, reference_scenario, reference_personality
 logger = logging.getLogger(__name__)
 
 _SYSTEM_PROMPT_TEMPLATE = (
-    "Generate a natural language response to the user's message.\n\n"
+    "Role: you are an AI persona representing the job candidate identified "
+    "below in a professional, text-based interview with an IT interviewer. "
+    "Stay fully in character as the candidate for the entire conversation -- "
+    "never break character, reveal that you are an AI model, or refer to "
+    "yourself as an assistant.\n\n"
+    "Candidate identity:\n{candidate_identity}\n\n"
+    "Task: generate the candidate's next natural language response to the "
+    "interviewer's message.\n\n"
+    "The core personality below is the authoritative definition of who you are "
+    "for this conversation -- it governs tone, attitude, and behaviour, and "
+    "takes priority over generic conversational habits. Ground every factual "
+    "claim about the candidate only in the reference material and conversation "
+    "history supplied in the user message -- never invent experiences, skills, "
+    "or opinions the candidate hasn't actually stated or that reference "
+    "material doesn't support.\n\n"
     "Core personality:\n{core_personality}\n"
 )
 
 _USER_PROMPT_TEMPLATE = (
     "Scenario reference:\n{scenario_reference_section}\n\n"
     "Document reference:\n{doc_reference_section}\n\n"
-    "Similar past questions and answers to guide tone and content "
-    "(not necessarily an exact match):\n{examples_section}\n\n"
+    "Similar past questions and answers (not necessarily an exact match to "
+    "the current message):\n{examples_section}\n\n"
+    "When a stored question closely matches the current one, use its answer "
+    "primarily to identify what kind of information should be covered in "
+    "your response -- not just as a tone or phrasing reference. Still build "
+    "the actual wording from personality and the reference material above, "
+    "rather than reusing the stored answer's phrasing verbatim.\n\n"
     "Conversation history for context:\n{history_section}\n\n"
     "User's current message:\n{user_message}"
+)
+
+_FIND_TOPIC_SYSTEM_PROMPT_TEMPLATE = (
+    "Your task is to identify which {topic_kind} topics are relevant to the "
+    "user's current message.\n\n"
+    "Be conservative: only select a topic if you are highly confident it is "
+    "directly relevant to answering the current message -- a loose, "
+    "tangential, or merely thematically-similar connection is not enough. "
+    "If no topic clears that bar, return an empty list rather than guessing "
+    "or including a weak match.\n\n"
+    "Return only the exact topic string(s) from the provided list -- never "
+    "invent a topic that isn't listed."
+)
+
+_FIND_TOPIC_USER_PROMPT_TEMPLATE = (
+    "The following topics represent different {topic_kind} that may be "
+    "useful to reply to the user's message. Topics and their descriptions:\n"
+    "{topic_descriptions}\n\n"
+    "{history_context}"
+    "Current user message: {user_message}\n\n"
+    "Using the conversation history strictly as context to understand "
+    "references (not as a source of topics on its own), select only the "
+    "topic(s) you are highly confident are directly relevant to answering "
+    "the current message. When in doubt, leave it out."
 )
 
 
@@ -83,12 +126,12 @@ class ModelCollaborateService:
         - conversation_id (str): the conversation being replied to — comes from model_orchestration
 
         Returns:
-        - dict: similar_examples, doc/scenario reference sections, doc/scenario topic lists, core_personality, recent_messages, summary — goes to _build_prompts and model_orchestration
+        - dict: similar_examples, doc/scenario reference sections, doc/scenario topic lists, candidate_identity, core_personality, recent_messages, summary — goes to _build_prompts and model_orchestration
         """
         conversation = self.conversation_service.get_conversation_unlocked(conversation_id)
         summary = conversation.summary if conversation else None
 
-        similar_examples = self.bm25_service.find_similar_questions(user_message, top_k=3)
+        similar_examples = self.bm25_service.find_similar_questions(user_message, top_k=1)
 
         # Fetch history first so we can use it to determine topics
         recent_messages = await self.conversation_service.get_recent_messages(conversation_id)
@@ -96,7 +139,7 @@ class ModelCollaborateService:
 
         doc_reference_section = self._get_doc_references(doc_topic_list)
         scenario_reference_section = self._get_scenario_references(scenario_topic_list)
-        core_personality = self._get_core_personality()
+        candidate_identity, core_personality = self._get_personality_profile()
 
         context = {
             "similar_examples": similar_examples,
@@ -104,6 +147,7 @@ class ModelCollaborateService:
             "scenario_reference_section": scenario_reference_section,
             "doc_topic_list": doc_topic_list,
             "scenario_topic_list": scenario_topic_list,
+            "candidate_identity": candidate_identity,
             "core_personality": core_personality,
             "recent_messages": recent_messages,
             "summary": summary
@@ -134,6 +178,7 @@ class ModelCollaborateService:
         history_section = self._prepare_history(context["recent_messages"], context["summary"])
 
         system_prompt = _SYSTEM_PROMPT_TEMPLATE.format(
+            candidate_identity=context["candidate_identity"],
             core_personality=context["core_personality"]
         )
 
@@ -173,23 +218,32 @@ class ModelCollaborateService:
 
         return final_response
 
-    # --- DB Helper Method for Core Personality ---
+    # --- DB Helper Method for Personality Profile ---
 
-    def _get_core_personality(self) -> str:
+    def _get_personality_profile(self) -> tuple[str, str]:
         """
-        Fetches the core personality text used in every reply's system prompt.
+        Fetches the single personality_reference row and builds the candidate identity block plus the core personality text.
 
         Parameters:
         - none
 
         Returns:
-        - str: the stored core_personality text from personality_reference (its single/first row — the table has no topic to select between), or a fallback string if the table is empty — goes to _gather_context_materials
+        - tuple[str, str]: (candidate_identity, core_personality) built from personality_reference's single/first row (the table has no topic to select between), or fallback strings if the table is empty — goes to _gather_context_materials
         """
-        row = self.db.query(reference_personality.PersonalityReference.core_personality).first()
+        row = self.db.query(reference_personality.PersonalityReference).first()
         if row is None:
-            logger.warning("personality_reference table is empty — using fallback core personality text.")
-            return "No core personality defined."
-        return row[0]
+            logger.warning("personality_reference table is empty — using fallback identity and personality text.")
+            return (
+                "Name: <not configured -- add a row to personality_reference>",
+                "No core personality defined."
+            )
+
+        candidate_identity = (
+            f"Legal name: {row.legal_name}\n"
+            f"Preferred name: {row.prefer_name}\n"
+            f"Cultural background: {row.cluture_background}"
+        )
+        return candidate_identity, row.core_personality
 
     # --- DB Helper Methods for Doc References ---
 
@@ -341,6 +395,64 @@ class ModelCollaborateService:
 
         return "This is a brand new conversation. No recent conversation history available."
 
+    def _select_relevant_topics(
+        self,
+        topic_kind: str,
+        topics_data: list[tuple[str, str]],
+        history_context: str,
+        user_message: str
+    ) -> list[str]:
+        """
+        Asks Gemini to conservatively select which topics are relevant to the user's message, requiring high confidence rather than any loose relation.
+
+        Parameters:
+        - topic_kind (str): human-readable label for what's being matched (e.g. "fact document", "scenario approach") — comes from find_topic
+        - topics_data (list[tuple[str, str]]): (topic, description) pairs to choose from — comes from find_topic
+        - history_context (str): formatted recent-history block, or "" if none — comes from find_topic
+        - user_message (str): the user's current message — comes from find_topic
+
+        Returns:
+        - list[str]: topics Gemini is highly confident are relevant, filtered to only those actually in topics_data — goes to find_topic
+        """
+        if not topics_data:
+            return []
+
+        all_topics = [t[0] for t in topics_data]
+        # Each topic and its description are unambiguously labeled and
+        # blank-line-separated -- topic_description never restates the topic
+        # name itself, so a terser "- topic: description" one-liner would
+        # rely purely on the model correctly parsing colon placement to keep
+        # pairs straight, especially with many topics listed at once.
+        descriptions_str = "\n\n".join(f"Topic: {t[0]}\nDescription: {t[1]}" for t in topics_data)
+
+        system_prompt = _FIND_TOPIC_SYSTEM_PROMPT_TEMPLATE.format(topic_kind=topic_kind)
+        user_prompt = _FIND_TOPIC_USER_PROMPT_TEMPLATE.format(
+            topic_kind=topic_kind,
+            topic_descriptions=descriptions_str,
+            history_context=history_context,
+            user_message=user_message
+        )
+        schema = {
+            "type": "ARRAY",
+            "items": {
+                "type": "STRING",
+                "enum": all_topics
+            }
+        }
+
+        response = self.gemini_service.call_model_structured(
+            model_name="gemini-2.5-flash",
+            user_prompt=user_prompt,
+            system_prompt=system_prompt,
+            schema=schema
+        )
+
+        if not isinstance(response, list):
+            logger.debug("find_topic (%s) returned %r, expected a list", topic_kind, response)
+            return []
+
+        return [topic for topic in response if topic in all_topics]
+
     async def find_topic(self, user_message: str, recent_messages: list | None = None) -> tuple[list[str], list[str]]:
         """
         Asks Gemini which document and scenario topics are relevant to the user's message.
@@ -365,88 +477,7 @@ class ModelCollaborateService:
             )
             history_context = f"Recent conversation history for context:\n{history_str}\n\n"
 
-        ### Find Doc Topics ###
-        _valid_doc_topics = []
-        if doc_topics_data:
-            all_doc_topics = [t[0] for t in doc_topics_data]
-            doc_descriptions_str = "\n".join(f"- {t[0]}: {t[1]}" for t in doc_topics_data)
+        doc_topics = self._select_relevant_topics("fact document", doc_topics_data, history_context, user_message)
+        scenario_topics = self._select_relevant_topics("scenario approach", scenario_topics_data, history_context, user_message)
 
-            doc_system_prompt = (
-                "Your task is to identify which fact document topics are relevant to the user's message. "
-                "Return only the exact topic(s) from the provided list that are relevant."
-            )
-
-            doc_user_prompt = (
-                "The following topics represent different fact documents that may be useful to reply to the user message. "
-                "Here are the topics and their descriptions:\n"
-                f"{doc_descriptions_str}\n\n"
-                f"{history_context}"
-                f"Current User message: {user_message}\n\n"
-                "Using the conversation history strictly as context to understand references, select the topic(s) "
-                "that are most relevant to answering the Current User message."
-            )
-
-            doc_schema = {
-                "type": "ARRAY",
-                "items": {
-                    "type": "STRING",
-                    "enum": all_doc_topics
-                }
-            }
-
-            doc_topic_response = self.gemini_service.call_model_structured(
-                model_name="gemini-2.5-flash",
-                user_prompt=doc_user_prompt,
-                system_prompt=doc_system_prompt,
-                schema=doc_schema
-            )
-
-            _valid_doc_topics = []
-            if isinstance(doc_topic_response, list):
-                _valid_doc_topics = [topic for topic in doc_topic_response if topic in all_doc_topics]
-            else:
-                logger.debug("find_topic doc search returned %r, expected a list", doc_topic_response)
-
-        ### Find Scenario Topics ###
-        _valid_scenario_topics = []
-        if scenario_topics_data:
-            all_scenario_topics = [t[0] for t in scenario_topics_data]
-            scenario_descriptions_str = "\n".join(f"- {t[0]}: {t[1]}" for t in scenario_topics_data)
-
-            scenario_system_prompt = (
-                "Your task is to identify which scenario approaches are relevant to the user's message. "
-                "Return only the exact topic(s) from the provided list that are relevant."
-            )
-
-            scenario_user_prompt = (
-                "The following topics represent different scenario approaches that may be relevant to reply to the user message. "
-                "Here are the topics and their descriptions:\n"
-                f"{scenario_descriptions_str}\n\n"
-                f"{history_context}"
-                f"Current User message: {user_message}\n\n"
-                "Using the conversation history strictly as context to understand references, select the topic(s) "
-                "that are most relevant to answering the Current User message."
-            )
-
-            scenario_schema = {
-                "type": "ARRAY",
-                "items": {
-                    "type": "STRING",
-                    "enum": all_scenario_topics
-                }
-            }
-
-            scenario_topic_response = self.gemini_service.call_model_structured(
-                model_name="gemini-2.5-flash",
-                user_prompt=scenario_user_prompt,
-                system_prompt=scenario_system_prompt,
-                schema=scenario_schema
-            )
-
-            _valid_scenario_topics = []
-            if isinstance(scenario_topic_response, list):
-                _valid_scenario_topics = [topic for topic in scenario_topic_response if topic in all_scenario_topics]
-            else:
-                logger.debug("find_topic scenario search returned %r, expected a list", scenario_topic_response)
-
-        return _valid_doc_topics, _valid_scenario_topics
+        return doc_topics, scenario_topics
