@@ -102,16 +102,7 @@ class ConversationService:
         self.db.flush()
         return entry
 
-    async def append_message(
-        self,
-        conversation_id: str | None,
-        code: str | None,
-        session_id: str,
-        sender: str,
-        text: str,
-        selected_scenario: str | None = None,
-        selected_document: str | None = None
-    ) -> tuple[conversation_models.Message, str]:
+    async def append_message(self, conversation_id: str | None, code: str | None, session_id: str, sender: str, text: str, selected_scenario: str | None = None, selected_document: str | None = None) -> tuple[conversation_models.Message, str]:
         """
         Inserts a new message row, creating the conversation first if conversation_id is None, or verifying ownership if it isn't.
 
@@ -158,14 +149,14 @@ class ConversationService:
 
     async def get_recent_messages(self, conversation_id: str, exclude_last: bool = True) -> list[conversation_models.Message]:
         """
-        Fetches messages after the conversation's last_summarized_index checkpoint, excluding sender="error" rows.
+        Fetches messages after the conversation's last_summarized_index checkpoint, excluding sender="error" and sender="regen" rows.
 
         Parameters:
         - conversation_id (str): the conversation to fetch messages for — comes from the caller
         - exclude_last (bool): drop the most recently persisted message, defaults to True — comes from the caller
 
         Returns:
-        - list[Message]: non-error messages after last_summarized_index, oldest first — goes to the caller (e.g. ModelCollaborateService, SummarizationService). sender="error" rows (logged when model_orchestration fails) are always excluded, both from live prompt history and from summarization, so a failed turn never shows up as a fake prior reply.
+        - list[Message]: non-error, non-regen messages after last_summarized_index, oldest first — goes to the caller (e.g. ModelCollaborateService, SummarizationService). sender="error" rows (logged when model_orchestration fails, or when ResponseGate.check exhausts its retries) and sender="regen" rows (rejected intermediate attempts logged by ResponseGate.check) are always excluded, both from live prompt history and from summarization, so a failed or discarded turn never shows up as a fake prior reply.
         """
         conversation = self.get_conversation_locked(conversation_id)
         if conversation is None:
@@ -176,7 +167,7 @@ class ConversationService:
             .filter(
                 conversation_models.Message.conversation_id == conversation_id,
                 conversation_models.Message.order_index > conversation.last_summarized_index,
-                conversation_models.Message.sender != "error")
+                conversation_models.Message.sender.notin_(["error", "regen"]))
             .order_by(conversation_models.Message.order_index.asc())
             .all())
 

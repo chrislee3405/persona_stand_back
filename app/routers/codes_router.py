@@ -13,11 +13,7 @@ class CodeSubmission(BaseModel):
     conversation_id: str | None = None
 
 @router.post("/api/code")
-async def verify_code(
-    payload: CodeSubmission,
-    request: Request,
-    service: CodeService = Depends()
-):
+async def verify_code(payload: CodeSubmission, request: Request, service: CodeService = Depends()):
     """
     Handles POST /api/code: verifies a submitted invite code and marks the session as verified.
 

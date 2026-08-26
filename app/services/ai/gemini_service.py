@@ -2,10 +2,16 @@ import os
 import json
 from typing import Union
 
-from vertexai.generative_models import GenerativeModel
-import vertexai
+from google import genai
+from google.genai import types
 
-vertexai.init(project=os.getenv("GCP_PROJECT_ID"), location="global")
+# vertexai=True routes through Vertex AI (using this environment's GCP
+# credentials -- Workload Identity Federation in production) rather than the
+# public Gemini Developer API, which would need a separate API key and bill
+# differently. Replaces the old `vertexai.init(...)` call -- see
+# https://docs.cloud.google.com/vertex-ai/generative-ai/docs/deprecations/genai-vertexai-sdk
+# (vertexai.generative_models is deprecated, removed June 24, 2026).
+_client = genai.Client(vertexai=True, project=os.getenv("GCP_PROJECT_ID"), location="global")
 
 # Whatever json.loads() can produce -- which is exactly what
 # call_model_structured returns, since it's a direct pass-through of the
@@ -35,8 +41,11 @@ class GeminiService:
         Returns:
         - str: the model's generated text — goes back to the calling service
         """
-        model = GenerativeModel(model_name, system_instruction=system_prompt)
-        response = model.generate_content(contents=user_prompt)
+        response = _client.models.generate_content(
+            model=model_name,
+            contents=user_prompt,
+            config=types.GenerateContentConfig(system_instruction=system_prompt)
+        )
         return response.text
 
     def call_model_structured(self, model_name: str, user_prompt: str, system_prompt: str, schema: dict) -> JSONValue:
@@ -52,12 +61,13 @@ class GeminiService:
         Returns:
         - JSONValue: the parsed JSON response, shaped by `schema` — goes back to the calling service
         """
-        model = GenerativeModel(model_name, system_instruction=system_prompt)
-        response = model.generate_content(
+        response = _client.models.generate_content(
+            model=model_name,
             contents=user_prompt,
-            generation_config={
-                "response_mime_type": "application/json",
-                "response_schema": schema
-            }
+            config=types.GenerateContentConfig(
+                system_instruction=system_prompt,
+                response_mime_type="application/json",
+                response_schema=schema
+            )
         )
         return json.loads(response.text)

@@ -11,11 +11,7 @@ class InvalidCodeError(Exception):
 
 
 class CodeService:
-    def __init__(
-        self,
-        db: Session = Depends(get_db),
-        conversation_service: ConversationService = Depends()
-    ):
+    def __init__(self, db: Session = Depends(get_db), conversation_service: ConversationService = Depends()):
         """
         Stores the injected database session and ConversationService.
 

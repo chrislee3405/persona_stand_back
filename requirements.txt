@@ -12,7 +12,6 @@ docstring_parser==0.18.0
 fastapi==0.141.1
 google-api-core==2.34.0
 google-auth==2.56.3
-google-cloud-aiplatform==1.163.0
 google-cloud-bigquery==3.43.0
 google-cloud-core==2.6.1
 google-cloud-resource-manager==1.18.0

@@ -9,6 +9,7 @@ from stemming.porter2 import stem
 
 from app.database import get_db
 from app.models import question_bank as question_bank_models
+from app.models.corpus_cache import CorpusCache
 
 logger = logging.getLogger(__name__)
 
@@ -142,16 +143,7 @@ def _compute_idf(df_dict: dict[str, int], ndocs: int, epsilon: float = 0.25) -> 
     return {term: (v if v > 0 else floor) for term, v in raw_idf.items()}
 
 
-def _bm25_score(
-    query_term_freqs: dict[str, int],
-    doc_term_freqs: dict[str, int],
-    doc_size: int,
-    avg_doc_length: float,
-    idf_dict: dict[str, float],
-    k1: float = 1.2,
-    k2: float = 100,
-    b: float = 0.4
-) -> float:
+def _bm25_score(query_term_freqs: dict[str, int], doc_term_freqs: dict[str, int], doc_size: int, avg_doc_length: float, idf_dict: dict[str, float], k1: float = 1.2, k2: float = 100, b: float = 0.4) -> float:
     """
     Computes the BM25 relevance score of one document against one query.
 
@@ -201,6 +193,13 @@ class BM25Service:
     approach is the next step up from this.
     """
 
+    # Class-level, not instance-level: FastAPI constructs a fresh BM25Service
+    # per request, so an instance attribute would never survive between
+    # requests. This dict persists for the lifetime of the running process,
+    # shared across every request handled by it. None means "not loaded into
+    # this process yet" -- distinct from an empty-but-loaded corpus.
+    _corpus_cache: dict | None = None
+
     def __init__(self, db: Session = Depends(get_db)):
         """
         Stores the injected database session and default stop-word set.
@@ -222,16 +221,76 @@ class BM25Service:
         - none
 
         Returns:
-        - list[QuestionBank]: all question_bank rows — goes to find_similar_questions
+        - list[QuestionBank]: all question_bank rows — goes to _compute_corpus
         """
         return self.db.query(question_bank_models.QuestionBank).all()
 
-    def find_similar_questions(
-        self,
-        user_message: str,
-        top_k: int = 3,
-        min_score: float = 0.0
-    ) -> list[dict]:
+    def _compute_corpus(self) -> dict | None:
+        """
+        Computes the BM25 corpus (per-question term frequencies/size, plus corpus-wide stats) from every question_bank row.
+
+        Parameters:
+        - none
+
+        Returns:
+        - dict | None: {"documents": [{"question", "answer", "term_freqs", "size"}, ...], "avg_doc_length", "df_dict", "idf_dict"}, or None if question_bank is empty — goes to _get_corpus, which caches it in memory and persists it to corpus_cache
+        """
+        rows = self._load_all()
+        if not rows:
+            return None
+
+        documents = []
+        for row in rows:
+            terms = _extract_terms(row.question, self.stop_words)
+            documents.append({
+                "question": row.question,
+                "answer": row.answer,
+                "term_freqs": _term_freqs(terms),
+                "size": len(terms)
+            })
+
+        doc_sizes = [doc["size"] for doc in documents]
+        avg_doc_length = sum(doc_sizes) / len(doc_sizes) if doc_sizes else 0
+        df_dict = _document_frequency([doc["term_freqs"] for doc in documents])
+        idf_dict = _compute_idf(df_dict, ndocs=len(rows))
+
+        return {
+            "documents": documents,
+            "avg_doc_length": avg_doc_length,
+            "df_dict": df_dict,
+            "idf_dict": idf_dict
+        }
+
+    def _get_corpus(self) -> dict | None:
+        """
+        Returns the BM25 corpus, preferring the in-memory cache, then the corpus_cache table, then computing it fresh from question_bank as a last resort.
+
+        Parameters:
+        - none
+
+        Returns:
+        - dict | None: the corpus (see _compute_corpus for shape), or None if question_bank is empty — goes to find_similar_questions
+        """
+        if BM25Service._corpus_cache is not None:
+            return BM25Service._corpus_cache
+
+        row = self.db.query(CorpusCache).first()
+        if row is not None:
+            logger.debug("Loaded BM25 corpus from corpus_cache table.")
+            BM25Service._corpus_cache = row.data
+            return BM25Service._corpus_cache
+
+        corpus = self._compute_corpus()
+        if corpus is None:
+            return None
+
+        BM25Service._corpus_cache = corpus
+        self.db.add(CorpusCache(data=corpus))
+        self.db.commit()
+        logger.debug("Computed BM25 corpus from question_bank and persisted it to corpus_cache.")
+        return corpus
+
+    def find_similar_questions(self, user_message: str, top_k: int = 3, min_score: float = 0.0) -> list[dict]:
         """
         Ranks question_bank rows by BM25 score against a user message and returns the top matches.
 
@@ -241,51 +300,47 @@ class BM25Service:
         - min_score (float): minimum score to include a result — defaults to 0.0
 
         Returns:
-        - list[dict]: up to top_k matches as {question, answer, score} — goes to the caller (e.g. ModelCollaborateService._gather_context_materials)
+        - list[dict]: up to top_k matches as {question, answer, score} — goes to the caller (e.g. ContextGatherer.gather)
         """
-        rows = self._load_all()
-        if not rows:
+        corpus = self._get_corpus()
+        if corpus is None:
             return []
-
-        doc_term_freqs_list = [
-            _term_freqs(_extract_terms(row.question, self.stop_words)) for row in rows
-        ]
-        doc_sizes = [len(_extract_terms(row.question, self.stop_words)) for row in rows]
-        avg_doc_length = sum(doc_sizes) / len(doc_sizes) if doc_sizes else 0
-        df_dict = _document_frequency(doc_term_freqs_list)
-        idf_dict = _compute_idf(df_dict, ndocs=len(rows))
 
         query_terms = _extract_terms(user_message, self.stop_words)
         if not query_terms:
             return []
         query_term_freqs = _term_freqs(query_terms)
 
+        documents = corpus["documents"]
+        avg_doc_length = corpus["avg_doc_length"]
+        idf_dict = corpus["idf_dict"]
+
         scored = []
-        for row, doc_term_freqs, doc_size in zip(rows, doc_term_freqs_list, doc_sizes):
+        for doc in documents:
             score = _bm25_score(
                 query_term_freqs=query_term_freqs,
-                doc_term_freqs=doc_term_freqs,
-                doc_size=doc_size,
+                doc_term_freqs=doc["term_freqs"],
+                doc_size=doc["size"],
                 avg_doc_length=avg_doc_length,
                 idf_dict=idf_dict
             )
-            scored.append((row, score))
+            scored.append((doc, score))
 
         scored.sort(key=lambda pair: pair[1], reverse=True)
 
         logger.debug(
             "BM25 scores for %r: %s",
             user_message,
-            [(row.id, round(score, 4)) for row, score in scored]
+            [(doc["question"], round(score, 4)) for doc, score in scored]
         )
 
         results = []
-        for row, score in scored[:top_k]:
+        for doc, score in scored[:top_k]:
             if score < min_score:
                 break
             results.append({
-                "question": row.question,
-                "answer": row.answer,
+                "question": doc["question"],
+                "answer": doc["answer"],
                 "score": score
             })
         return results

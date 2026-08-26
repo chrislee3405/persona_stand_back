@@ -8,12 +8,7 @@ router = APIRouter()
 
 
 @router.post("/api/guestchat")
-async def guestchat(
-    payload: ChatMessageCreate,
-    request: Request,
-    background_tasks: BackgroundTasks,
-    chat_service: ChatService = Depends()
-):
+async def guestchat(payload: ChatMessageCreate, request: Request, background_tasks: BackgroundTasks, chat_service: ChatService = Depends()):
     """
     Handles POST /api/guestchat: routes a guest user's message to ChatService and maps its errors to HTTP responses.
 
@@ -44,12 +39,7 @@ async def guestchat(
 
 
 @router.post("/api/invitechat")
-async def invitechat(
-    payload: ChatMessageCreate,
-    request: Request,
-    background_tasks: BackgroundTasks,
-    chat_service: ChatService = Depends()
-):
+async def invitechat(payload: ChatMessageCreate, request: Request, background_tasks: BackgroundTasks, chat_service: ChatService = Depends()):
     """
     Handles POST /api/invitechat: routes a verified user's message to ChatService and maps its errors to HTTP responses.
 

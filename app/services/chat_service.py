@@ -26,12 +26,7 @@ def _join_topics(topics: list[str] | None) -> str | None:
 
 
 class ChatService:
-    def __init__(
-        self,
-        conversation_service: ConversationService = Depends(),
-        model_service: ModelCollaborateService = Depends(),
-        summarization_service: SummarizationService = Depends()
-    ):
+    def __init__(self, conversation_service: ConversationService = Depends(), model_service: ModelCollaborateService = Depends(), summarization_service: SummarizationService = Depends()):
         """
         Stores the injected service instances used to run a chat turn.
 
@@ -47,14 +42,7 @@ class ChatService:
         self.model_service = model_service
         self.summarization_service = summarization_service
 
-    async def handle_chat_turn(
-        self,
-        session_id: str,
-        code: str | None,
-        conversation_id: str | None,
-        user_text: str,
-        background_tasks: BackgroundTasks
-    ) -> dict:
+    async def handle_chat_turn(self, session_id: str, code: str | None, conversation_id: str | None, user_text: str, background_tasks: BackgroundTasks) -> dict:
         """
         Persists a user's message, generates the AI reply, persists it, and schedules summarization.
 
@@ -66,7 +54,7 @@ class ChatService:
         - background_tasks (BackgroundTasks): task queue — comes from the router, used to schedule summarization after the response is sent
 
         Returns:
-        - dict: reply text, sender, and conversationId — goes back to the router as the response body
+        - dict: reply split into display turns, sender, and conversationId — goes back to the router as the response body
 
         """
         ### rate control gate ###
@@ -109,8 +97,8 @@ class ChatService:
         #    summarization and future prompt history, so a failed turn
         #    never shows up as a fake prior reply.
         try:
-            reply_text, selected_doc_topics, selected_scenario_topics = await self.model_service.model_orchestration(
-                user_text, conversation_id
+            reply_text, reply_turns, selected_doc_topics, selected_scenario_topics = await self.model_service.model_orchestration(
+                user_text, conversation_id, session_id
             )
         except Exception:
             logger.exception("model_orchestration failed for conversation_id=%s", conversation_id)
@@ -122,13 +110,16 @@ class ChatService:
                 text=traceback.format_exc()
             )
             return {
-                "text": "Sorry, something went wrong while generating a response. Please try again.",
+                "turns": ["Sorry, something went wrong while generating a response. Please try again."],
                 "sender": "backend",
                 "conversationId": conversation_id
             }
 
         # 3. Persist the backend's reply, along with which topics were
-        #    selected to generate it.
+        #    selected to generate it. Always the full, unsplit reply_text --
+        #    reply_turns is display-only, for the frontend to reveal as
+        #    several sequential bubbles; the database keeps one row with
+        #    the complete original text for the app owner to review.
         await self.conversation_service.append_message(
             conversation_id=conversation_id,
             code=code,
@@ -149,7 +140,7 @@ class ChatService:
         )
 
         return {
-            "text": reply_text,
+            "turns": reply_turns,
             "sender": "backend",
             "conversationId": conversation_id  # frontend captures this on first message
         }
