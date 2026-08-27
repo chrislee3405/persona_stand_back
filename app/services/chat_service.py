@@ -3,11 +3,31 @@ import traceback
 
 from fastapi import BackgroundTasks, Depends
 
+from app.services.consent_service import ConsentService
 from app.services.conversation_manage_service import ConversationService, ConversationNotFoundError, ConversationAccessDeniedError
 from app.services.model_collarborate_service import ModelCollaborateService
-from app.services.summarization_service import SummarizationService
+from app.services.privacy_gate_service import PrivacyGateService
+from app.services.rate_control_service import RateControlService, get_rate_control_service, TooManyPendingMessagesFromIpError
+from app.services.model_collarborate.summarization_service import SummarizationService
 
 logger = logging.getLogger(__name__)
+
+# Max characters allowed in one user message -- generous enough for a
+# normal conversational turn, while bounding worst-case cost (a longer
+# message means more tokens sent to Gemini and more text for the privacy
+# gate's NER pass to scan) and stopping someone from pasting in a massive
+# block of text. Mirrored in Chatroom.tsx (MAX_MESSAGE_LENGTH) as an
+# <input maxLength> plus a matching client-side check -- same "frontend is
+# UX only, this is the real enforcement" relationship as the other gates.
+MAX_MESSAGE_LENGTH = 2000
+
+
+class MessageTooLongError(Exception):
+    """Raised when user_text exceeds MAX_MESSAGE_LENGTH."""
+
+    def __init__(self, length: int):
+        self.length = length
+        super().__init__(f"message length {length} exceeds max of {MAX_MESSAGE_LENGTH}")
 
 
 def _join_topics(topics: list[str] | None) -> str | None:
@@ -26,7 +46,7 @@ def _join_topics(topics: list[str] | None) -> str | None:
 
 
 class ChatService:
-    def __init__(self, conversation_service: ConversationService = Depends(), model_service: ModelCollaborateService = Depends(), summarization_service: SummarizationService = Depends()):
+    def __init__(self, conversation_service: ConversationService = Depends(), model_service: ModelCollaborateService = Depends(), summarization_service: SummarizationService = Depends(), privacy_gate_service: PrivacyGateService = Depends(), rate_control_service: RateControlService = Depends(get_rate_control_service), consent_service: ConsentService = Depends()):
         """
         Stores the injected service instances used to run a chat turn.
 
@@ -34,15 +54,21 @@ class ChatService:
         - conversation_service (ConversationService): persists messages/conversations — injected by FastAPI
         - model_service (ModelCollaborateService): generates the AI reply — injected by FastAPI
         - summarization_service (SummarizationService): summarizes conversation history — injected by FastAPI
+        - privacy_gate_service (PrivacyGateService): screens raw user text for PII before it reaches append_message or the LLM — injected by FastAPI
+        - rate_control_service (RateControlService): caps/paces how often a session reaches append_message or the LLM — injected by FastAPI as the shared singleton (get_rate_control_service), not a fresh instance per request
+        - consent_service (ConsentService): verifies this session has agreed to have its input collected before anything else runs — injected by FastAPI
 
         Returns:
-        - None: sets self.conversation_service, self.model_service, self.summarization_service
+        - None: sets self.conversation_service, self.model_service, self.summarization_service, self.privacy_gate_service, self.rate_control_service, self.consent_service
         """
         self.conversation_service = conversation_service
         self.model_service = model_service
         self.summarization_service = summarization_service
+        self.privacy_gate_service = privacy_gate_service
+        self.rate_control_service = rate_control_service
+        self.consent_service = consent_service
 
-    async def handle_chat_turn(self, session_id: str, code: str | None, conversation_id: str | None, user_text: str, background_tasks: BackgroundTasks) -> dict:
+    async def handle_chat_turn(self, session_id: str, code: str | None, conversation_id: str | None, user_text: str, background_tasks: BackgroundTasks, client_ip: str) -> dict:
         """
         Persists a user's message, generates the AI reply, persists it, and schedules summarization.
 
@@ -52,95 +78,115 @@ class ChatService:
         - conversation_id (str | None): conversation to append to, or None to create one — comes from the router's request body
         - user_text (str): the user's message text — comes from the router's request body
         - background_tasks (BackgroundTasks): task queue — comes from the router, used to schedule summarization after the response is sent
+        - client_ip (str): the caller's client IP — comes from the router (get_client_ip), used only for the rate control gate's per-IP backstop
 
         Returns:
         - dict: reply split into display turns, sender, and conversationId — goes back to the router as the response body
 
         """
-        ### rate control gate ###
-        # TODO implement a rate control gate to prevent user send too much request
-        # remember to implement to the frontend as well (slightly shorter than frontend for better UX)
+        ### message length gate ###
+        # Cheapest check, so it runs before anything that costs real work
+        # (consent DB lookup, Presidio's NER pass, a Gemini call) -- no
+        # reason to spend any of that on a message that's getting rejected
+        # anyway. Raises MessageTooLongError (-> HTTP 413 in
+        # conversations_router).
+        if len(user_text) > MAX_MESSAGE_LENGTH:
+            raise MessageTooLongError(len(user_text))
+
+        ### consent gate ###
+        # Must run before anything else touches user_text -- raises
+        # ConsentRequiredError (-> HTTP 403 in conversations_router) if
+        # this session hasn't agreed to the current consent_policy version
+        # yet (see ConsentService.get_current_policy).
+        self.consent_service.check(session_id)
 
         ### privacy gate ###
-        # TODO implement a local privacy gate to do the first filter to see if the user_text contain sensitive information
-        # After first filter pass the user_text to AI to verify if containing privacy or not
+        # Local Presidio check, Raises PrivacyViolationError when privacy found
+        self.privacy_gate_service.check(user_text)
 
-        # 1. Persist the user's message, creating the conversation first if
-        #    conversation_id is None, or verifying ownership if it isn't. A
-        #    stale/tampered conversation_id (not found, or not owned by this
-        #    session) isn't treated as an error -- silently fall back to
-        #    starting a brand new conversation instead, same as if
-        #    conversation_id had been None all along.
+        ### rate control gate ###
+        # reserve_slot/reserve_ip_slot raise TooManyPendingMessagesError /
+        # TooManyPendingMessagesFromIpError (-> HTTP 429) if this session,
+        # or this IP across any session, already has too many messages in
+        # flight -- the IP check is a backstop against bypassing the
+        # per-session cap by dropping the session cookie. turn() then
+        # waits for this session's spot -- serialized and paced -- before
+        # anything below runs, holding the session locked until this whole
+        # turn (including persisting the reply) finishes, so a later
+        # message's history always sees this one's reply already persisted.
+        self.rate_control_service.reserve_slot(session_id)
         try:
-            _, conversation_id = await self.conversation_service.append_message(
-                conversation_id=conversation_id,
-                code=code,
-                session_id=session_id,
-                sender="user",
-                text=user_text
-            )
-        except (ConversationNotFoundError, ConversationAccessDeniedError):
-            _, conversation_id = await self.conversation_service.append_message(
-                conversation_id=None,
-                code=code,
-                session_id=session_id,
-                sender="user",
-                text=user_text
-            )
+            self.rate_control_service.reserve_ip_slot(client_ip)
+        except TooManyPendingMessagesFromIpError:
+            self.rate_control_service.release_slot(session_id)
+            raise
 
-        # 2. Generate the reply via the AI flow, plus which doc/scenario
-        #    topics were actually selected to produce it. Any failure here
-        #    (Gemini error, malformed structured response, etc.) is logged
-        #    as a sender="error" message for later review instead of
-        #    500ing -- the user's message above stays persisted either way.
-        #    get_recent_messages excludes sender="error" rows from both
-        #    summarization and future prompt history, so a failed turn
-        #    never shows up as a fake prior reply.
         try:
-            reply_text, reply_turns, selected_doc_topics, selected_scenario_topics = await self.model_service.model_orchestration(
-                user_text, conversation_id, session_id
-            )
-        except Exception:
-            logger.exception("model_orchestration failed for conversation_id=%s", conversation_id)
-            await self.conversation_service.append_message(
-                conversation_id=conversation_id,
-                code=code,
-                session_id=session_id,
-                sender="error",
-                text=traceback.format_exc()
-            )
-            return {
-                "turns": ["Sorry, something went wrong while generating a response. Please try again."],
-                "sender": "backend",
-                "conversationId": conversation_id
-            }
+            async with self.rate_control_service.turn(session_id):
+                # 1.    Persist the user's message
+                #       creating  conversation if conversation_id is None,
+                #       verifying conversation_id ownership.
+                try:
+                    _, conversation_id = await self.conversation_service.append_message(
+                        conversation_id=conversation_id,
+                        code=code,
+                        session_id=session_id,
+                        sender="user",
+                        text=user_text
+                    )
+                except (ConversationNotFoundError, ConversationAccessDeniedError):
+                    _, conversation_id = await self.conversation_service.append_message(
+                        conversation_id=None,
+                        code=code,
+                        session_id=session_id,
+                        sender="user",
+                        text=user_text
+                    )
 
-        # 3. Persist the backend's reply, along with which topics were
-        #    selected to generate it. Always the full, unsplit reply_text --
-        #    reply_turns is display-only, for the frontend to reveal as
-        #    several sequential bubbles; the database keeps one row with
-        #    the complete original text for the app owner to review.
-        await self.conversation_service.append_message(
-            conversation_id=conversation_id,
-            code=code,
-            session_id=session_id,
-            sender="backend",
-            text=reply_text,
-            selected_document=_join_topics(selected_doc_topics),
-            selected_scenario=_join_topics(selected_scenario_topics)
-        )
+                # 2.    Generate the reply via the AI flow
+                #       Any failure here is logged as a sender="error" message
+                try:
+                    reply_text, reply_turns, selected_doc_topics, selected_scenario_topics = await self.model_service.model_orchestration(
+                        user_text, conversation_id, session_id
+                    )
+                except Exception:
+                    logger.exception("model_orchestration failed for conversation_id=%s", conversation_id)
+                    await self.conversation_service.append_message(
+                        conversation_id=conversation_id,
+                        code=code,
+                        session_id=session_id,
+                        sender="error",
+                        text=traceback.format_exc()
+                    )
+                    return {
+                        "turns": ["Sorry, something went wrong while generating a response. Please try again."],
+                        "sender": "backend",
+                        "conversationId": conversation_id
+                    }
 
-        # 4. Now that both the user's message and the backend's reply are
-        #    persisted, schedule the summarization threshold check as a
-        #    background task -- non-blocking, and summarizes the complete
-        #    exchange.
-        background_tasks.add_task(
-            self.summarization_service.summarize_conversation_if_needed,
-            conversation_id=conversation_id
-        )
+                #       3. Persist the backend's reply
+                await self.conversation_service.append_message(
+                    conversation_id=conversation_id,
+                    code=code,
+                    session_id=session_id,
+                    sender="backend",
+                    text=reply_text,
+                    selected_document=_join_topics(selected_doc_topics),
+                    selected_scenario=_join_topics(selected_scenario_topics)
+                )
 
-        return {
-            "turns": reply_turns,
-            "sender": "backend",
-            "conversationId": conversation_id  # frontend captures this on first message
-        }
+                # 4.    Now that both the user's message and the backend's reply are persisted,
+                #       schedule the summarization threshold check as a background task
+                background_tasks.add_task(
+                    self.summarization_service.summarize_conversation_if_needed,
+                    conversation_id=conversation_id
+                )
+
+                return {
+                    "turns": reply_turns,
+                    "sender": "backend",
+                    "conversationId": conversation_id  # frontend captures this on first message
+                }
+        finally:
+            self.rate_control_service.release_ip_slot(client_ip)
+            self.rate_control_service.release_slot(session_id)

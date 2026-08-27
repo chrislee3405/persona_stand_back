@@ -7,7 +7,7 @@ from app.database import get_db
 from app.services.ai.gemini_service import GeminiService
 from app.services.bm25_service import BM25Service
 from app.services.conversation_manage_service import ConversationService
-from app.models import reference_doc, reference_scenario, reference_personality
+from app.models.prompt_reference import DocReference, PersonalityReference, ScenarioReference
 
 logger = logging.getLogger(__name__)
 
@@ -105,7 +105,7 @@ class ContextGatherer:
         Returns:
         - tuple[str, str]: (candidate_identity, core_personality) built from personality_reference's single/first row (the table has no topic to select between), or fallback strings if the table is empty — goes to gather
         """
-        row = self.db.query(reference_personality.PersonalityReference).first()
+        row = self.db.query(PersonalityReference).first()
         if row is None:
             logger.warning("personality_reference table is empty — using fallback identity and personality text.")
             return (
@@ -133,8 +133,8 @@ class ContextGatherer:
         - list[tuple[str, str]]: (document_topic, topic_description) pairs — goes to _find_topic
         """
         rows = self.db.query(
-            reference_doc.DocReference.document_topic,
-            reference_doc.DocReference.topic_description
+            DocReference.document_topic,
+            DocReference.topic_description
         ).all()
         return [(row[0], row[1]) for row in rows]
 
@@ -149,8 +149,8 @@ class ContextGatherer:
         - str | None: the document content, or None if not found — goes to _get_doc_references
         """
         row = (
-            self.db.query(reference_doc.DocReference.content)
-            .filter(reference_doc.DocReference.document_topic == topic)
+            self.db.query(DocReference.content)
+            .filter(DocReference.document_topic == topic)
             .first()
         )
         return row[0] if row else None
@@ -189,8 +189,8 @@ class ContextGatherer:
         - list[tuple[str, str]]: (scenario_topic, topic_description) pairs — goes to _find_topic
         """
         rows = self.db.query(
-            reference_scenario.ScenarioReference.scenario_topic,
-            reference_scenario.ScenarioReference.topic_description
+            ScenarioReference.scenario_topic,
+            ScenarioReference.topic_description
         ).all()
         return [(row[0], row[1]) for row in rows]
 
@@ -205,8 +205,8 @@ class ContextGatherer:
         - str | None: the scenario content, or None if not found — goes to _get_scenario_references
         """
         row = (
-            self.db.query(reference_scenario.ScenarioReference.content)
-            .filter(reference_scenario.ScenarioReference.scenario_topic == topic)
+            self.db.query(ScenarioReference.content)
+            .filter(ScenarioReference.scenario_topic == topic)
             .first()
         )
         return row[0] if row else None

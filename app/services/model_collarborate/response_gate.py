@@ -19,11 +19,14 @@ _VERIFY_NATURAL_RESPONSE_SYSTEM_PROMPT_TEMPLATE = (
     "- The AI response should not make any promise to the user.\n"
     "- The AI response should only use the persona's actual punctuation habits: periods, commas, question marks, quotation marks only when essential, and $/% for money or percentages. Reject any other symbols, emoji, or markdown-style formatting (e.g. **, <>, [], ;, !, ...).\n"
     "- The AI response should not contradict facts the persona already stated earlier in this conversation.\n\n"
-    "If the response breaks no rule, return \"<pass>\" as result, and \"<pass>\" as reason too.\n\n"
+    "If the response breaks no rule, return \"<pass>\" as result, \"<pass>\" as reason, and \"<pass>\" as quote too.\n\n"
     "If the response breaks a rule, return the reject type as result:\n"
     "- \"<reject-minor>\": another AI could correct the response given only the reject reason and the original response.\n"
     "- \"<reject-major>\": another AI needs the reject reason plus the whole background information again, to regenerate the response with a different approach.\n\n"
-    "In both reject cases, give a specific explanation of what broke, as reason."
+    "In both reject cases, give a specific explanation of what broke, as reason -- and as quote, copy the "
+    "exact substring of the AI response that demonstrates the violation, character-for-character, not a "
+    "paraphrase or summary. If you cannot point to an exact substring that actually demonstrates the "
+    "violation, return \"<pass>\" for all three fields instead of guessing."
 )
 
 _VERIFY_NATURAL_RESPONSE_USER_PROMPT_TEMPLATE = (
@@ -50,7 +53,7 @@ class ResponseGate:
         self.conversation_service = conversation_service
         self.regen_counter = regen_counter
 
-    def _verify_response(self, recent_conversation_part: str, user_message: str, ai_response: str) -> tuple[str, str]:
+    def _verify_response(self, recent_conversation_part: str, user_message: str, ai_response: str) -> tuple[str, str, str]:
         """
         Asks Gemini to audit one candidate response against the natural-response rules.
 
@@ -60,7 +63,7 @@ class ResponseGate:
         - ai_response (str): the candidate response being audited — comes from check (either the original reply or a regenerated one)
 
         Returns:
-        - tuple[str, str]: (result_tag, reason), result_tag is one of "<pass>" / "<reject-minor>" / "<reject-major>" — goes to check
+        - tuple[str, str, str]: (result_tag, reason, quote), result_tag is one of "<pass>" / "<reject-minor>" / "<reject-major>", quote is the exact substring of ai_response the model claims demonstrates the violation (or "<pass>") — goes to check, which cross-checks quote against ai_response before trusting a reject verdict
         """
         user_prompt = _VERIFY_NATURAL_RESPONSE_USER_PROMPT_TEMPLATE.format(
             recent_conversation_part=recent_conversation_part,
@@ -76,9 +79,12 @@ class ResponseGate:
                 },
                 "reason": {
                     "type": "STRING"
+                },
+                "quote": {
+                    "type": "STRING"
                 }
             },
-            "required": ["result", "reason"]
+            "required": ["result", "reason", "quote"]
         }
 
         check_result = self.gemini_service.call_model_structured(
@@ -87,7 +93,7 @@ class ResponseGate:
             system_prompt=_VERIFY_NATURAL_RESPONSE_SYSTEM_PROMPT_TEMPLATE,
             schema=schema
         )
-        return check_result["result"], check_result["reason"]
+        return check_result["result"], check_result["reason"], check_result["quote"]
 
     async def check(self, context: dict, user_message: str, ai_response: str, system_prompt: str, user_prompt: str, conversation_id: str, session_id: str) -> str:
         """
@@ -116,9 +122,26 @@ class ResponseGate:
         # and could reintroduce whatever attempt 1 already got rejected for.
         reject_history: list[str] = []
         for attempt in range(self.regen_counter):
-            result, reason = self._verify_response(recent_conversation_part, user_message, current_response)
+            result, reason, quote = self._verify_response(recent_conversation_part, user_message, current_response)
 
             if result == "<pass>":
+                return current_response
+
+            # The model must ground a reject verdict in an exact substring of
+            # the response it's judging (see the system prompt's quote
+            # instruction). If it can't -- an empty/placeholder quote, or one
+            # that doesn't actually appear in current_response -- the verdict
+            # itself is untrustworthy (e.g. rejecting for a semicolon or
+            # ampersand that was never actually in the text) rather than the
+            # response being genuinely at fault, so treat it as a pass
+            # instead of burning a regen attempt correcting a problem that
+            # doesn't exist.
+            is_grounded = bool(quote) and quote != "<pass>" and quote in current_response
+            if not is_grounded:
+                logger.warning(
+                    "ResponseGate.check attempt %d/%d: rejection (%s: %s) quoted %r, which isn't in the response -- treating as ungrounded and passing it through.",
+                    attempt + 1, self.regen_counter, result, reason, quote
+                )
                 return current_response
 
             logger.warning(
@@ -139,6 +162,14 @@ class ResponseGate:
                 sender="regen",
                 text=f"[Attempt {attempt + 1}/{self.regen_counter}, {result}: {reason}]\n\n{current_response}"
             )
+
+            # No point regenerating on the last attempt -- nothing left in
+            # this loop would ever verify it, so it would just be discarded
+            # unchecked (and previously was, at the cost of a wasted Gemini
+            # call and a misleading "last rejected response" in the fallback
+            # log below, since that response was never actually verified).
+            if attempt == self.regen_counter - 1:
+                break
 
             if result == "<reject-minor>":
                 regen_system_prompt = (
