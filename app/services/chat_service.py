@@ -7,7 +7,7 @@ from app.services.consent_service import ConsentService
 from app.services.conversation_manage_service import ConversationService, ConversationNotFoundError, ConversationAccessDeniedError
 from app.services.model_collarborate_service import ModelCollaborateService
 from app.services.privacy_gate_service import PrivacyGateService
-from app.services.rate_control_service import RateControlService, get_rate_control_service, TooManyPendingMessagesFromIpError
+from app.services.rate_control_service import RateControlService, RateTier, get_rate_control_service, TooManyPendingMessagesFromIpError
 from app.services.model_collarborate.summarization_service import SummarizationService
 
 logger = logging.getLogger(__name__)
@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 # block of text. Mirrored in Chatroom.tsx (MAX_MESSAGE_LENGTH) as an
 # <input maxLength> plus a matching client-side check -- same "frontend is
 # UX only, this is the real enforcement" relationship as the other gates.
-MAX_MESSAGE_LENGTH = 2000
+MAX_MESSAGE_LENGTH = 750
 
 
 class MessageTooLongError(Exception):
@@ -78,7 +78,7 @@ class ChatService:
         - conversation_id (str | None): conversation to append to, or None to create one — comes from the router's request body
         - user_text (str): the user's message text — comes from the router's request body
         - background_tasks (BackgroundTasks): task queue — comes from the router, used to schedule summarization after the response is sent
-        - client_ip (str): the caller's client IP — comes from the router (get_client_ip), used only for the rate control gate's per-IP backstop
+        - client_ip (str): the caller's client IP — comes from the router (get_client_ip), used only for the rate control gate's per-IP backstop (guest sessions only, see below)
 
         Returns:
         - dict: reply split into display turns, sender, and conversationId — goes back to the router as the response body
@@ -105,24 +105,38 @@ class ChatService:
         self.privacy_gate_service.check(user_text)
 
         ### rate control gate ###
-        # reserve_slot/reserve_ip_slot raise TooManyPendingMessagesError /
-        # TooManyPendingMessagesFromIpError (-> HTTP 429) if this session,
-        # or this IP across any session, already has too many messages in
-        # flight -- the IP check is a backstop against bypassing the
-        # per-session cap by dropping the session cookie. turn() then
-        # waits for this session's spot -- serialized and paced -- before
-        # anything below runs, holding the session locked until this whole
-        # turn (including persisting the reply) finishes, so a later
-        # message's history always sees this one's reply already persisted.
-        self.rate_control_service.reserve_slot(session_id)
-        try:
-            self.rate_control_service.reserve_ip_slot(client_ip)
-        except TooManyPendingMessagesFromIpError:
-            self.rate_control_service.release_slot(session_id)
-            raise
+        # Invite (verified-code) sessions get a more generous tier than
+        # guest sessions -- see RateTier/_INTERVAL_SECONDS/
+        # _MAX_PENDING_PER_SESSION in rate_control_service.py. `code` is
+        # only ever set here for /api/invitechat (see conversations_router).
+        tier: RateTier = "invite" if code else "guest"
+
+        # reserve_slot raises TooManyPendingMessagesError (-> HTTP 429) if
+        # this session already has too many messages in flight. turn()
+        # then waits for this session's spot -- serialized and paced --
+        # before anything below runs, holding the session locked until
+        # this whole turn (including persisting the reply) finishes, so a
+        # later message's history always sees this one's reply already
+        # persisted.
+        self.rate_control_service.reserve_slot(session_id, tier)
+
+        # The per-IP backstop only applies to guest traffic. It exists to
+        # catch cheap session-cycling -- dropping the session cookie to
+        # get a fresh guest session with no memory of prior throttling.
+        # That bypass doesn't apply to invite sessions: getting one
+        # requires a genuinely valid invite code each time, which is
+        # trusted here not to be shared/leaked, so invite traffic isn't
+        # IP-limited at all -- only its (higher) per-session cap/interval
+        # above applies.
+        if tier == "guest":
+            try:
+                self.rate_control_service.reserve_ip_slot(client_ip)
+            except TooManyPendingMessagesFromIpError:
+                self.rate_control_service.release_slot(session_id)
+                raise
 
         try:
-            async with self.rate_control_service.turn(session_id):
+            async with self.rate_control_service.turn(session_id, tier):
                 # 1.    Persist the user's message
                 #       creating  conversation if conversation_id is None,
                 #       verifying conversation_id ownership.
@@ -147,7 +161,7 @@ class ChatService:
                 #       Any failure here is logged as a sender="error" message
                 try:
                     reply_text, reply_turns, selected_doc_topics, selected_scenario_topics = await self.model_service.model_orchestration(
-                        user_text, conversation_id, session_id
+                        user_text, conversation_id, session_id, tier
                     )
                 except Exception:
                     logger.exception("model_orchestration failed for conversation_id=%s", conversation_id)
@@ -188,5 +202,10 @@ class ChatService:
                     "conversationId": conversation_id  # frontend captures this on first message
                 }
         finally:
-            self.rate_control_service.release_ip_slot(client_ip)
+            # Only release what was actually reserved above -- releasing
+            # unconditionally would wrongly decrement another, unrelated
+            # guest request's count for this same IP if this request was
+            # invite-tier (and so never reserved an IP slot to begin with).
+            if tier == "guest":
+                self.rate_control_service.release_ip_slot(client_ip)
             self.rate_control_service.release_slot(session_id)

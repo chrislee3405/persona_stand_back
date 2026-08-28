@@ -37,21 +37,19 @@ _VERIFY_NATURAL_RESPONSE_USER_PROMPT_TEMPLATE = (
 
 
 class ResponseGate:
-    def __init__(self, gemini_service: GeminiService = Depends(), conversation_service: ConversationService = Depends(), regen_counter: int = 3):
+    def __init__(self, gemini_service: GeminiService = Depends(), conversation_service: ConversationService = Depends()):
         """
-        Stores the injected service instances and the regen-attempt hyperparameter.
+        Stores the injected service instances.
 
         Parameters:
         - gemini_service (GeminiService): calls the Gemini model — injected by FastAPI, or passed explicitly by ModelCollaborateService
         - conversation_service (ConversationService): persists regen/fallback review rows — injected by FastAPI, or passed explicitly
-        - regen_counter (int): max verify-then-regenerate attempts, defaults to 3 — comes from ModelCollaborateService's _REGEN_COUNTER hyperparameter
 
         Returns:
-        - None: sets self.gemini_service, self.conversation_service, self.regen_counter
+        - None: sets self.gemini_service, self.conversation_service
         """
         self.gemini_service = gemini_service
         self.conversation_service = conversation_service
-        self.regen_counter = regen_counter
 
     def _verify_response(self, recent_conversation_part: str, user_message: str, ai_response: str) -> tuple[str, str, str]:
         """
@@ -95,9 +93,9 @@ class ResponseGate:
         )
         return check_result["result"], check_result["reason"], check_result["quote"]
 
-    async def check(self, context: dict, user_message: str, ai_response: str, system_prompt: str, user_prompt: str, conversation_id: str, session_id: str) -> str:
+    async def check(self, context: dict, user_message: str, ai_response: str, system_prompt: str, user_prompt: str, conversation_id: str, session_id: str, regen_counter: int) -> str:
         """
-        Verifies the candidate response against the natural-response rules, regenerating up to self.regen_counter times if rejected.
+        Verifies the candidate response against the natural-response rules, regenerating up to regen_counter times if rejected.
 
         Parameters:
         - context (dict): gathered context materials, used for recent_messages — comes from ModelCollaborateService.model_orchestration
@@ -107,9 +105,10 @@ class ResponseGate:
         - user_prompt (str): the original reply-generation user prompt (reference material/history/message) — comes from model_orchestration, reused unmodified for every regeneration attempt
         - conversation_id (str): the conversation being replied to — comes from model_orchestration, used to persist regen/fallback review rows
         - session_id (str): the caller's session — comes from model_orchestration, used to persist regen/fallback review rows (ownership already verified earlier in the same request; conversation_id is always already resolved here, so `code` is irrelevant and passed as None)
+        - regen_counter (int): max verify-then-regenerate attempts — comes from model_orchestration, resolved from ModelCollaborateService's per-tier _REGEN_COUNTER hyperparameter (a request's tier isn't known until then, so this isn't fixed at ResponseGate construction)
 
         Returns:
-        - str: a response that passed verification, or a generic fallback if it's still rejected after self.regen_counter attempts — goes to model_orchestration
+        - str: a response that passed verification, or a generic fallback if it's still rejected after regen_counter attempts — goes to model_orchestration
         """
         recent_conversation_part = ""
         if context["recent_messages"]:
@@ -121,7 +120,7 @@ class ResponseGate:
         # attempt 3's regen prompt would only know about attempt 2's reason
         # and could reintroduce whatever attempt 1 already got rejected for.
         reject_history: list[str] = []
-        for attempt in range(self.regen_counter):
+        for attempt in range(regen_counter):
             result, reason, quote = self._verify_response(recent_conversation_part, user_message, current_response)
 
             if result == "<pass>":
@@ -140,13 +139,13 @@ class ResponseGate:
             if not is_grounded:
                 logger.warning(
                     "ResponseGate.check attempt %d/%d: rejection (%s: %s) quoted %r, which isn't in the response -- treating as ungrounded and passing it through.",
-                    attempt + 1, self.regen_counter, result, reason, quote
+                    attempt + 1, regen_counter, result, reason, quote
                 )
                 return current_response
 
             logger.warning(
                 "ResponseGate.check attempt %d/%d rejected (%s): %s",
-                attempt + 1, self.regen_counter, result, reason
+                attempt + 1, regen_counter, result, reason
             )
 
             reject_history.append(f"Attempt {attempt + 1} ({result}): {reason}")
@@ -160,7 +159,7 @@ class ResponseGate:
                 code=None,
                 session_id=session_id,
                 sender="regen",
-                text=f"[Attempt {attempt + 1}/{self.regen_counter}, {result}: {reason}]\n\n{current_response}"
+                text=f"[Attempt {attempt + 1}/{regen_counter}, {result}: {reason}]\n\n{current_response}"
             )
 
             # No point regenerating on the last attempt -- nothing left in
@@ -168,7 +167,7 @@ class ResponseGate:
             # unchecked (and previously was, at the cost of a wasted Gemini
             # call and a misleading "last rejected response" in the fallback
             # log below, since that response was never actually verified).
-            if attempt == self.regen_counter - 1:
+            if attempt == regen_counter - 1:
                 break
 
             if result == "<reject-minor>":
@@ -194,7 +193,7 @@ class ResponseGate:
 
         logger.warning(
             "ResponseGate.check exhausted %d attempts, still failing verification -- returning fallback response.",
-            self.regen_counter
+            regen_counter
         )
         fallback_response = "Sorry, I'm having trouble forming a suitable response right now. Please try rephrasing your message."
         await self.conversation_service.append_message(
@@ -202,6 +201,6 @@ class ResponseGate:
             code=None,
             session_id=session_id,
             sender="error",
-            text=f"[ResponseGate.check exhausted {self.regen_counter} attempts]\n{chr(10).join(reject_history)}\n\nLast rejected response:\n\n{current_response}"
+            text=f"[ResponseGate.check exhausted {regen_counter} attempts]\n{chr(10).join(reject_history)}\n\nLast rejected response:\n\n{current_response}"
         )
         return fallback_response

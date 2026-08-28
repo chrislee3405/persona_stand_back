@@ -32,4 +32,10 @@ class ConsentRecord(Base):
     id = Column(Integer, primary_key=True, index=True)
     session_id = Column(String, nullable=False, index=True)
     policy_version = Column(String, ForeignKey("consent_policy.version"), nullable=False)
+    # The exact text the client submitted (validated to match
+    # ConsentPolicy.condition_text at the time -- see
+    # ConsentService.record_consent) captured onto the record itself, so
+    # this row is self-contained proof of what was agreed to even if the
+    # consent_policy row it points at is ever edited afterward.
+    condition_text = Column(Text, nullable=False)
     consented_at = Column(DateTime(timezone=True), server_default=func.now())
