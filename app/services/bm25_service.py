@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from stemming.porter2 import stem
 
 from app.database import get_db
-from app.models import question_bank as question_bank_models
+from app.models import prompt_reference as question_bank_models
 from app.models.corpus_cache import CorpusCache
 
 logger = logging.getLogger(__name__)

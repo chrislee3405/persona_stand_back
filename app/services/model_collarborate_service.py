@@ -11,12 +11,23 @@ from app.services.model_collarborate.context_gatherer import ContextGatherer
 from app.services.model_collarborate.prompt_builder import PromptBuilder
 from app.services.model_collarborate.response_gate import ResponseGate
 from app.services.model_collarborate.response_parser import ResponseParser
+from app.services.rate_control_service import RateTier
 
 logger = logging.getLogger(__name__)
 
 # Hyperparameters -- the one place to tune these; passed into the sub-services
 # below rather than living next to the code that consumes them.
-_REGEN_COUNTER = 3
+# Max verify-then-regenerate attempts (see ResponseGate.check), per tier.
+# Guest gets fewer attempts than invite -- each attempt is a Gemini call, so
+# this is a cost lever in the same spirit as RateTier's other per-tier
+# limits in rate_control_service.py, not just a quality one. Resolved by
+# tier in model_orchestration and passed into ResponseGate.check() per
+# call, rather than baked into ResponseGate at construction, since a
+# request's tier isn't known until model_orchestration is called.
+_REGEN_COUNTER: dict[RateTier, int] = {
+    "guest": 2,
+    "invite": 4,
+}
 # Minimum characters per turn when splitting a response into several message
 # bubbles. Larger value -> fewer, longer turns allowed; smaller value ->
 # more, shorter turns allowed. Tune during testing.
@@ -40,10 +51,10 @@ class ModelCollaborateService:
         self.gemini_service = gemini_service
         self.context_gatherer = ContextGatherer(db, gemini_service, bm25_service, conversation_service)
         self.prompt_builder = PromptBuilder()
-        self.response_gate = ResponseGate(gemini_service, conversation_service, regen_counter=_REGEN_COUNTER)
+        self.response_gate = ResponseGate(gemini_service, conversation_service)
         self.response_parser = ResponseParser(gemini_service, min_chars_per_turn=_MIN_CHARS_PER_TURN)
 
-    async def model_orchestration(self, user_message: str, conversation_id: str, session_id: str) -> tuple[str, list[str], list[str], list[str]]:
+    async def model_orchestration(self, user_message: str, conversation_id: str, session_id: str, tier: RateTier) -> tuple[str, list[str], list[str], list[str]]:
         """
         Gathers context, builds prompts, and generates the AI reply to a user message.
 
@@ -51,6 +62,7 @@ class ModelCollaborateService:
         - user_message (str): the user's current message — comes from conversations_router (guestchat/invitechat)
         - conversation_id (str): the conversation being replied to — comes from conversations_router
         - session_id (str): the caller's session — comes from conversations_router, needed by ResponseGate to persist regen/fallback review rows via ConversationService.append_message
+        - tier (RateTier): "guest" or "invite" — comes from ChatService.handle_chat_turn, selects which cap in _REGEN_COUNTER applies
 
         Returns:
         - tuple[str, list[str], list[str], list[str]]: full reply text (for DB storage), reply split into display turns (for the frontend), selected doc topics, selected scenario topics — goes to conversations_router, which persists the full reply text and logs the selected topics
@@ -65,7 +77,7 @@ class ModelCollaborateService:
         ai_response = self._generate_ai_response(system_prompt, user_prompt)
 
         # 4a. response consistency verification
-        final_response = await self.response_gate.check(context, user_message, ai_response, system_prompt, user_prompt, conversation_id, session_id)
+        final_response = await self.response_gate.check(context, user_message, ai_response, system_prompt, user_prompt, conversation_id, session_id, regen_counter=_REGEN_COUNTER[tier])
 
         # 4b. response parsing into several display turns
         response_turns = self.response_parser.parse(final_response)
