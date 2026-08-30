@@ -40,8 +40,6 @@ services:
       - "80:80"
     depends_on:
       - backend
-    environment:
-      - VITE_API_URL=http://backend:8000
     networks:
       - persona_network
     restart: unless-stopped
