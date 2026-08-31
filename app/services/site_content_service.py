@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models.site_content import SiteContent
+from app.models.site_image import SiteImage
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +29,11 @@ class SiteContentService:
     prose sections, a list for the journey timeline). This service just
     passes it straight through -- SQLAlchemy hands back a dict/list and
     FastAPI serializes it back to JSON, so callers never parse a string.
+
+    Images are kept out of `content` entirely -- they live in the
+    `site_image` table (app/models/site_image.py), one row per version of
+    each (section, description) image slot, and the get_*_images methods
+    read them with the same "newest row wins" rule.
     """
 
     def __init__(self, db: Session = Depends(get_db)):
@@ -76,3 +82,56 @@ class SiteContentService:
             .all()
         )
         return {row.section: row.content for row in rows}
+
+    def get_all_images(self) -> dict[str, list[dict[str, str]]]:
+        """
+        Fetches the current image for every (section, description) slot, grouped by section -- the picture side of what the main page loads on first paint.
+
+        Parameters:
+        - none
+
+        Returns:
+        - dict[str, list[dict[str, str]]]: section slug -> list of {"description": ..., "path": ...} (the S3 object key), one entry per distinct (section, description) slot (its newest row). Empty dict if site_image has no rows. Uses Postgres DISTINCT ON (section, description) with a matching ORDER BY so exactly the newest row per slot comes back.
+        """
+        rows = (
+            self.db.query(SiteImage)
+            .distinct(SiteImage.section, SiteImage.description)
+            .order_by(
+                SiteImage.section,
+                SiteImage.description,
+                desc(SiteImage.created_at),
+                desc(SiteImage.id),
+            )
+            .all()
+        )
+        grouped: dict[str, list[dict[str, str]]] = {}
+        for row in rows:
+            grouped.setdefault(row.section, []).append(
+                {"description": row.description, "path": row.image_path}
+            )
+        return grouped
+
+    def get_section_images(self, section: str) -> list[dict[str, str]]:
+        """
+        Fetches the current image for every slot of one section.
+
+        Parameters:
+        - section (str): the section slug, e.g. "personal_statement" -- comes from the router's path parameter
+
+        Returns:
+        - list[dict[str, str]]: {"description": ..., "path": ...} per slot, newest row per (section, description). Empty list if the section has no images.
+        """
+        rows = (
+            self.db.query(SiteImage)
+            .filter(SiteImage.section == section)
+            .distinct(SiteImage.description)
+            .order_by(
+                SiteImage.description,
+                desc(SiteImage.created_at),
+                desc(SiteImage.id),
+            )
+            .all()
+        )
+        return [
+            {"description": row.description, "path": row.image_path} for row in rows
+        ]

@@ -16,23 +16,118 @@ class SiteContent(Base):
     `section`, so the previous version stays in the table as history and
     can be restored by inserting it again.
 
-    `section` is a stable slug the frontend and back-end agree on, e.g.
-    "personal_statement", "qualifications", "journey".
+    `section` is a stable slug the frontend and back-end agree on. The five
+    required sections and the exact JSON shape the frontend expects for each
+    are below. `content` is JSONB; nothing in this table enforces the shape,
+    so keep the writer disciplined. `?` marks an optional key. These are
+    templates, not literal JSON -- fill the <...> placeholders. See also
+    persona_stand_ec2yml/Part_D.md (D.2 seed SQL, D.5 shapes table).
 
-    `content` is JSONB and its shape depends on the section -- the section
-    slug implies the schema. Nothing in this table enforces that shape;
-    keep the writer disciplined (see the seed block in main.py for the
-    canonical shapes). Examples:
-      - "personal_statement": {"body": "Hi there! ..."}
-      - "journey": [
-            {"id": "2024-award", "year": "2024", "title": "...",
-             "body": "...", "media": "journey/2024-award.jpg",
-             "layout": "image-right"},
-            ...
-        ]
-    `media` values are object-storage keys, never URLs or image data.
-    `layout` is a hint the frontend maps to a layout/animation template;
-    the animation code itself lives only in the frontend.
+    ------------------------------------------------------------------
+    section = "personal_statement"      JSON OBJECT     Home -> About
+    ------------------------------------------------------------------
+    {
+      "heading":   "<string>",    ?   # small heading above the bio
+      "body":      "<string>",        # bio paragraph (required)
+      "cta": {                    ?   # call-to-action button
+        "label":   "<string>",        #   button text
+        "href":    "<string>"         #   route, e.g. "/chatroom"
+      },
+      "hero": {                   ?   # hero-image FRAMING overrides. Any
+        "fit": "cover"|"fitHeight",?  #   subset; unset fields use the frontend
+        "height":     <number>,  ?   #   defaults. Lets the About photo be
+        "heightMin":  <number>,  ?   #   re-framed from the DB with no redeploy.
+        "heightMax":  <number>,  ?   #   "fit": "cover" fills+crops the band;
+        "focusX":     <number>,  ?   #   "fitHeight" shows the whole photo on
+        "focusY":     <number>,  ?   #   the left. Meaning of each: see
+        "zoom":       <number>,  ?   #   HERO_DEFAULTS in
+        "scrimStart": <number>,  ?   #   persona_stand_front/src/pages/Home.tsx
+        "scrimEnd":   <number>,  ?
+        "textWidth":  <number>   ?
+      },
+      "qualHero": { ...same keys as "hero"... }, ?
+                                      # framing for the Qualifications & Awards
+                                      #   banner (mirror layout: image on the
+                                      #   RIGHT, text on the LEFT). Only shows
+                                      #   when a site_image ("qualifications",
+                                      #   "banner") row exists.
+      "certHero": { ...same keys as "hero"... }, ?
+                                      # framing for the Certifications banner
+                                      #   (image LEFT, text RIGHT, like About).
+                                      #   Only shows when a site_image
+                                      #   ("certifications", "banner") row exists.
+      "heroImage": "<string>"     ?   # LEGACY -- do not use in new rows.
+                                      #   Images now live in the site_image
+                                      #   table (section="personal_statement",
+                                      #   description="hero"). Old rows that
+                                      #   still carry this key work as a
+                                      #   fallback; see app/models/site_image.py
+    }
+
+    ------------------------------------------------------------------
+    section = "qualifications"          JSON ARRAY      Home -> Qualifications & Awards
+    ------------------------------------------------------------------
+    [
+      {
+        "id":          "<string>",     # stable key (required)
+        "title":       "<string>",     # qualification / award name (required)
+        "institution": "<string>", ?   # school / awarding body
+        "year":        "<string>", ?   # e.g. "2024" or "2024 - 2026"
+        "detail":      "<string>"  ?   # one extra line (or null)
+      }
+      # ... more items; array order = display order. Degrees and awards
+      # share this list -- put degrees first, then awards.
+    ]
+    # A bare {"body": "<string>"} object is also accepted here for a
+    # single free-text paragraph instead of a list.
+
+    ------------------------------------------------------------------
+    section = "certifications"          JSON ARRAY      Home -> Certifications
+    ------------------------------------------------------------------
+    [
+      {
+        "id":     "<string>",          # stable key (required)
+        "title":  "<string>",          # certification name (required)
+        "issuer": "<string>",      ?   # awarding body / exam board
+        "year":   "<string>",      ?   # e.g. "2023"
+        "detail": "<string>"       ?   # one extra line (or null)
+      }
+      # ... more items; array order = display order
+    ]
+
+    ------------------------------------------------------------------
+    section = "journey"                 JSON ARRAY      Home -> Journey
+    ------------------------------------------------------------------
+    [
+      {
+        "id":    "<string>",           # stable key + scroll anchor (required)
+        "year":  "<string>",           # timeline label, e.g. "2018" (required)
+        "title": "<string>",           # block heading (required)
+        "body":  "<string>"            # block paragraph (required)
+      }
+      # ... more blocks; array order = top-to-bottom order
+    ]
+
+    ------------------------------------------------------------------
+    section = "contact"                 JSON OBJECT     Contact page + footer
+    ------------------------------------------------------------------
+    {
+      "email":    "<string>",          # rendered as a mailto link (required)
+      "intro":    "<string>",     ?    # short line above the details
+      "location": "<string>",     ?    # e.g. "Brisbane, Australia"
+      "links": [                  ?    # social links; the footer shows the
+        { "label": "<string>",         #   LinkedIn / GitHub ones, matched by
+          "href":  "<string>" }        #   label containing "linkedin" /
+      ]                                #   "github" (case-insensitive)
+    }
+
+    Images are NOT stored in this table anymore -- they live in the
+    `site_image` table (app/models/site_image.py), one row per version of a
+    (section, description) image slot, holding the S3 object key. The
+    frontend gets them alongside this content from GET /api/site-content
+    ("images" key) and resolves each key against the CDN base. The only
+    remnant here is the legacy "heroImage" key on old personal_statement
+    rows, kept as a read fallback.
     """
     __tablename__ = "site_content"
     __table_args__ = (

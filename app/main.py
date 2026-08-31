@@ -8,6 +8,7 @@ from app.routers import codes_router, conversations_router, consent_router, site
 from app.database import engine, Base, SessionLocal
 from app.models.consent import ConsentPolicy
 from app.models.site_content import SiteContent  # noqa: F401  -- registers table for create_all
+from app.models.site_image import SiteImage  # noqa: F401  -- registers table for create_all
 
 
 logging.basicConfig(
