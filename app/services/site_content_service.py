@@ -1,4 +1,3 @@
-import logging
 from typing import Any
 
 from fastapi import Depends
@@ -8,8 +7,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.site_content import SiteContent
 from app.models.site_image import SiteImage
-
-logger = logging.getLogger(__name__)
+from app.models.site_journey import SiteJourney
 
 
 class SiteContentService:
@@ -32,8 +30,13 @@ class SiteContentService:
 
     Images are kept out of `content` entirely -- they live in the
     `site_image` table (app/models/site_image.py), one row per version of
-    each (section, description) image slot, and the get_*_images methods
-    read them with the same "newest row wins" rule.
+    each (section, description) image slot, and get_all_images() reads them
+    with the same "newest row wins" rule. The Journey click-through detail
+    sheets live in `site_journey` (app/models/site_journey.py), read by
+    get_all_journey_details() the same way.
+
+    The frontend only ever calls GET /api/site-content, so the three
+    "fetch everything" methods below are all this service needs.
     """
 
     def __init__(self, db: Session = Depends(get_db)):
@@ -47,23 +50,6 @@ class SiteContentService:
         - None: sets self.db
         """
         self.db = db
-
-    def get_section(self, section: str) -> SiteContent | None:
-        """
-        Fetches the current copy for one section.
-
-        Parameters:
-        - section (str): the section slug, e.g. "personal_statement" -- comes from the router's path parameter
-
-        Returns:
-        - SiteContent | None: the newest row for that section (newest created_at, then highest id), or None if the section has no rows
-        """
-        return (
-            self.db.query(SiteContent)
-            .filter(SiteContent.section == section)
-            .order_by(desc(SiteContent.created_at), desc(SiteContent.id))
-            .first()
-        )
 
     def get_all_current(self) -> dict[str, Any]:
         """
@@ -111,27 +97,24 @@ class SiteContentService:
             )
         return grouped
 
-    def get_section_images(self, section: str) -> list[dict[str, str]]:
+    def get_all_journey_details(self) -> dict[str, Any]:
         """
-        Fetches the current image for every slot of one section.
+        Fetches the current detail sheet for every journey block in one query -- the expanded content the main page shows in the bottom pop-up when a Journey card is clicked.
 
         Parameters:
-        - section (str): the section slug, e.g. "personal_statement" -- comes from the router's path parameter
+        - none
 
         Returns:
-        - list[dict[str, str]]: {"description": ..., "path": ...} per slot, newest row per (section, description). Empty list if the section has no images.
+        - dict[str, Any]: journey_id -> content (a dict, per site_journey's shape), one entry per distinct journey_id (its newest row). Empty dict if site_journey has no rows. Uses Postgres DISTINCT ON (journey_id) with a matching ORDER BY so exactly the newest row per block comes back.
         """
         rows = (
-            self.db.query(SiteImage)
-            .filter(SiteImage.section == section)
-            .distinct(SiteImage.description)
+            self.db.query(SiteJourney)
+            .distinct(SiteJourney.journey_id)
             .order_by(
-                SiteImage.description,
-                desc(SiteImage.created_at),
-                desc(SiteImage.id),
+                SiteJourney.journey_id,
+                desc(SiteJourney.created_at),
+                desc(SiteJourney.id),
             )
             .all()
         )
-        return [
-            {"description": row.description, "path": row.image_path} for row in rows
-        ]
+        return {row.journey_id: row.content for row in rows}

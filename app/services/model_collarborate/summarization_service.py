@@ -1,13 +1,9 @@
-import logging
-
 from fastapi import Depends
 from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.services.conversation_manage_service import ConversationService
 from app.services.ai.gemini_service import GeminiService
-
-logger = logging.getLogger(__name__)
 
 RECENT_MESSAGES_BEFORE_SUMMARIZE = 10
 

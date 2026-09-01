@@ -16,9 +16,9 @@ class SiteContent(Base):
     `section`, so the previous version stays in the table as history and
     can be restored by inserting it again.
 
-    `section` is a stable slug the frontend and back-end agree on. The five
-    required sections and the exact JSON shape the frontend expects for each
-    are below. `content` is JSONB; nothing in this table enforces the shape,
+    `section` is a stable slug the frontend and back-end agree on. The
+    sections and the exact JSON shape the frontend expects for each are
+    below. `content` is JSONB; nothing in this table enforces the shape,
     so keep the writer disciplined. `?` marks an optional key. These are
     templates, not literal JSON -- fill the <...> placeholders. See also
     persona_stand_ec2yml/Part_D.md (D.2 seed SQL, D.5 shapes table).
@@ -56,12 +56,12 @@ class SiteContent(Base):
                                       #   (image LEFT, text RIGHT, like About).
                                       #   Only shows when a site_image
                                       #   ("certifications", "banner") row exists.
-      "heroImage": "<string>"     ?   # LEGACY -- do not use in new rows.
-                                      #   Images now live in the site_image
-                                      #   table (section="personal_statement",
-                                      #   description="hero"). Old rows that
-                                      #   still carry this key work as a
-                                      #   fallback; see app/models/site_image.py
+      # NO image key here. Every image on the site -- the hero included --
+      # is a site_image row. The hero is section="personal_statement",
+      # description="hero" (app/models/site_image.py). A leftover "heroImage"
+      # key on an old row is IGNORED by the frontend; migrate it with the
+      # one-liner in persona_stand_ec2yml/Part_D.md ("Migrating an existing
+      # environment").
     }
 
     ------------------------------------------------------------------
@@ -96,17 +96,51 @@ class SiteContent(Base):
     ]
 
     ------------------------------------------------------------------
+    section = "projects"                JSON ARRAY      Home -> Projects
+    ------------------------------------------------------------------
+    [
+      {
+        "id":        "<string>",       # stable key AND route slug (required):
+                                       #   the thumbnail and the navbar
+                                       #   "Projects" dropdown both link to
+                                       #   /projects/<id>, so this must match a
+                                       #   project page route.
+        "label":     "<string>",       # caption + <img alt> + dropdown text (required)
+        "image_tag": "<string>"    ?   # names a site_image row -- section
+                                       #   "projects", description == this value
+                                       #   (defaults to `id`). The thumbnail URL
+                                       #   is built from THAT row's image_path.
+                                       #   No image path is stored in this row --
+                                       #   every image comes from site_image.
+      }
+      # ... more items; array order = left-to-right order in the scroller
+      #     AND top-to-bottom order in the navbar dropdown
+    ]
+
+    ------------------------------------------------------------------
     section = "journey"                 JSON ARRAY      Home -> Journey
     ------------------------------------------------------------------
     [
       {
-        "id":    "<string>",           # stable key + scroll anchor (required)
-        "year":  "<string>",           # timeline label, e.g. "2018" (required)
-        "title": "<string>",           # block heading (required)
-        "body":  "<string>"            # block paragraph (required)
+        "id":        "<string>",       # stable key + scroll anchor (required)
+        "year":      "<string>",       # timeline label, e.g. "2018" (required)
+        "title":     "<string>",       # block heading (required)
+        "body":      "<string>",       # block paragraph (required)
+        "image_tag": "<string>"    ?   # names a site_image row -- section
+                                       #   "journey", description == this value.
+                                       #   That row's image_path shows on the
+                                       #   OPPOSITE side of the card. Omit, or
+                                       #   leave a "<...>" placeholder, for no
+                                       #   image. NOT an S3 key itself -- the key
+                                       #   lives in site_image.image_path.
       }
       # ... more blocks; array order = top-to-bottom order
     ]
+    # The card shows this summary. The long-form story behind a block --
+    # shown in a bottom pop-up when the card is clicked -- lives in the
+    # separate `site_journey` table (app/models/site_journey.py), keyed by
+    # the block's `id`. A block with no site_journey row just has a
+    # non-clickable card.
 
     ------------------------------------------------------------------
     section = "contact"                 JSON OBJECT     Contact page + footer
@@ -121,13 +155,14 @@ class SiteContent(Base):
       ]                                #   "github" (case-insensitive)
     }
 
-    Images are NOT stored in this table anymore -- they live in the
-    `site_image` table (app/models/site_image.py), one row per version of a
-    (section, description) image slot, holding the S3 object key. The
-    frontend gets them alongside this content from GET /api/site-content
-    ("images" key) and resolves each key against the CDN base. The only
-    remnant here is the legacy "heroImage" key on old personal_statement
-    rows, kept as a read fallback.
+    Images are NEVER stored in this table (nor in `site_journey`). EVERY
+    image the site renders -- hero, section banners, project thumbnails,
+    journey block pictures -- is a `site_image` row (app/models/
+    site_image.py), one per version of a (section, description) slot,
+    holding the S3 object key. The frontend gets them alongside this content
+    from GET /api/site-content ("images" key) and resolves each key against
+    the CDN base. A leftover "heroImage" key on an old personal_statement
+    row is ignored; migrate it to a site_image row (Part_D.md).
     """
     __tablename__ = "site_content"
     __table_args__ = (

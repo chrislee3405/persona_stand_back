@@ -28,6 +28,8 @@ class SiteImage(Base):
                  "qualifications banner". (section, description) together
                  identify one logical image slot; insert a new row with the
                  same pair to swap the picture in that slot.
+                 For section "journey" the description is the `image_tag`
+                 named by a block in the journey site_content array.
     image_path   S3 object KEY only, e.g. "about_me/main_img.png" -- never a
                  full URL, never the image bytes. The frontend resolves it
                  against the CloudFront base in src/lib/assetUrl.ts.
