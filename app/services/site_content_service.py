@@ -8,6 +8,7 @@ from app.database import get_db
 from app.models.site_content import SiteContent
 from app.models.site_image import SiteImage
 from app.models.site_journey import SiteJourney
+from app.models.site_project import SiteProject
 
 
 class SiteContentService:
@@ -118,3 +119,25 @@ class SiteContentService:
             .all()
         )
         return {row.journey_id: row.content for row in rows}
+
+    def get_all_project_details(self) -> dict[str, Any]:
+        """
+        Fetches the current detail sheet for every project in one query -- the expanded content the main page shows in the bottom pop-up when a Projects thumbnail is clicked.
+
+        Parameters:
+        - none
+
+        Returns:
+        - dict[str, Any]: project_id -> content (a dict, per site_project's shape), one entry per distinct project_id (its newest row). Empty dict if site_project has no rows. Uses Postgres DISTINCT ON (project_id) with a matching ORDER BY so exactly the newest row per project comes back.
+        """
+        rows = (
+            self.db.query(SiteProject)
+            .distinct(SiteProject.project_id)
+            .order_by(
+                SiteProject.project_id,
+                desc(SiteProject.created_at),
+                desc(SiteProject.id),
+            )
+            .all()
+        )
+        return {row.project_id: row.content for row in rows}

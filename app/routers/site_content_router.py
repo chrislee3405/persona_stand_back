@@ -20,11 +20,13 @@ async def get_all_site_content(service: SiteContentService = Depends()):
     - dict: {
         "content": { <section slug>: <content>, ... },   # one entry per section ({} if none configured)
         "images":  { <section slug>: [ { "description": <slot label>, "path": <S3 key> }, ... ], ... },
-        "journeyDetails": { <journey block id>: <detail content>, ... }   # expanded copy for the Journey click-through sheet ({} if none configured)
+        "journeyDetails": { <journey block id>: <detail content>, ... },  # expanded copy for the Journey click-through sheet ({} if none configured)
+        "projectDetails": { <project id>: <detail content>, ... }   # expanded copy for the Projects click-through sheet ({} if none configured)
       } -- sent back as the JSON response
     """
     return {
         "content": service.get_all_current(),
         "images": service.get_all_images(),
         "journeyDetails": service.get_all_journey_details(),
+        "projectDetails": service.get_all_project_details(),
     }

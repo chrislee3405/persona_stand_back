@@ -100,12 +100,10 @@ class SiteContent(Base):
     ------------------------------------------------------------------
     [
       {
-        "id":        "<string>",       # stable key AND route slug (required):
-                                       #   the thumbnail and the navbar
-                                       #   "Projects" dropdown both link to
-                                       #   /projects/<id>, so this must match a
-                                       #   project page route.
-        "label":     "<string>",       # caption + <img alt> + dropdown text (required)
+        "id":        "<string>",       # stable key (required). Also the
+                                       #   site_project.project_id that holds
+                                       #   this project's pop-up detail.
+        "label":     "<string>",       # caption + <img alt> + sheet heading (required)
         "image_tag": "<string>"    ?   # names a site_image row -- section
                                        #   "projects", description == this value
                                        #   (defaults to `id`). The thumbnail URL
@@ -114,8 +112,11 @@ class SiteContent(Base):
                                        #   every image comes from site_image.
       }
       # ... more items; array order = left-to-right order in the scroller
-      #     AND top-to-bottom order in the navbar dropdown
     ]
+    # This is the card. Clicking a thumbnail opens a bottom pop-up whose
+    # content lives in the separate `site_project` table
+    # (app/models/site_project.py), keyed by this `id`. A project with no
+    # site_project row just has a non-clickable thumbnail.
 
     ------------------------------------------------------------------
     section = "journey"                 JSON ARRAY      Home -> Journey
@@ -155,14 +156,15 @@ class SiteContent(Base):
       ]                                #   "github" (case-insensitive)
     }
 
-    Images are NEVER stored in this table (nor in `site_journey`). EVERY
-    image the site renders -- hero, section banners, project thumbnails,
-    journey block pictures -- is a `site_image` row (app/models/
-    site_image.py), one per version of a (section, description) slot,
-    holding the S3 object key. The frontend gets them alongside this content
-    from GET /api/site-content ("images" key) and resolves each key against
-    the CDN base. A leftover "heroImage" key on an old personal_statement
-    row is ignored; migrate it to a site_image row (Part_D.md).
+    Media is NEVER stored in this table (nor in `site_journey` /
+    `site_project`). EVERY image AND video the site renders -- hero, section
+    banners, project thumbnails, journey block pictures, project demo clips
+    -- is a `site_image` row (app/models/site_image.py; it holds any S3
+    object key, .mp4 included), one per version of a (section, description)
+    slot. The frontend gets them alongside this content from GET
+    /api/site-content ("images" key) and resolves each key against the CDN
+    base. A leftover "heroImage" key on an old personal_statement row is
+    ignored; migrate it to a site_image row (Part_D.md).
     """
     __tablename__ = "site_content"
     __table_args__ = (

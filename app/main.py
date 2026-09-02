@@ -10,6 +10,7 @@ from app.models.consent import ConsentPolicy
 from app.models.site_content import SiteContent  # noqa: F401  -- registers table for create_all
 from app.models.site_image import SiteImage  # noqa: F401  -- registers table for create_all
 from app.models.site_journey import SiteJourney  # noqa: F401  -- registers table for create_all
+from app.models.site_project import SiteProject  # noqa: F401  -- registers table for create_all
 
 
 logging.basicConfig(
