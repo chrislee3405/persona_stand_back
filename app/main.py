@@ -4,9 +4,13 @@ import os
 from fastapi import FastAPI
 
 from app.middleware import setup_middleware
-from app.routers import codes_router, conversations_router, consent_router
+from app.routers import codes_router, conversations_router, consent_router, site_content_router
 from app.database import engine, Base, SessionLocal
 from app.models.consent import ConsentPolicy
+from app.models.site_content import SiteContent  # noqa: F401  -- registers table for create_all
+from app.models.site_image import SiteImage  # noqa: F401  -- registers table for create_all
+from app.models.site_journey import SiteJourney  # noqa: F401  -- registers table for create_all
+from app.models.site_project import SiteProject  # noqa: F401  -- registers table for create_all
 
 
 logging.basicConfig(
@@ -43,3 +47,4 @@ setup_middleware(app)
 app.include_router(conversations_router.router, tags=["conversations"])
 app.include_router(codes_router.router, tags=["codes"])
 app.include_router(consent_router.router, tags=["consent"])
+app.include_router(site_content_router.router, tags=["site-content"])
