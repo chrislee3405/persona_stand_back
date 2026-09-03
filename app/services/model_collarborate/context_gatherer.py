@@ -7,9 +7,18 @@ from app.database import get_db
 from app.services.ai.gemini_service import GeminiService
 from app.services.bm25_service import BM25Service
 from app.services.conversation_manage_service import ConversationService
+from app.services.model_collarborate.prepare_history import prepare_history
 from app.models.prompt_reference import DocReference, PersonalityReference, ScenarioReference
 
 logger = logging.getLogger(__name__)
+
+# How many BM25 hits to hand the model to re-rank. BM25 is keyword-overlap
+# only, so its #1 hit is often a generic "tell me about yourself" row that
+# shares words but not meaning; a handful of candidates gives the model
+# room to pick the real match (or reject them all). More candidates = a
+# slightly better chance the right row is in the set, at more prompt
+# tokens per turn.
+_EXAMPLE_CANDIDATE_COUNT = 5
 
 _FIND_TOPIC_SYSTEM_PROMPT_TEMPLATE = (
     "Your task is to identify which {topic_kind} topics are relevant to the "
@@ -33,6 +42,28 @@ _FIND_TOPIC_USER_PROMPT_TEMPLATE = (
     "references (not as a source of topics on its own), select only the "
     "topic(s) you are highly confident are directly relevant to answering "
     "the current message. When in doubt, leave it out."
+)
+
+_SELECT_EXAMPLE_SYSTEM_PROMPT = (
+    "You are picking which stored interview question -- if any -- genuinely "
+    "matches what the user is asking right now, so its stored answer can "
+    "guide the reply.\n\n"
+    "The candidates were retrieved by keyword overlap, which is easily "
+    "misled by shared generic words such as \"tell\", \"yourself\", "
+    "\"interest\", or \"company\". Judge by MEANING, not shared words: keep "
+    "a candidate only if it asks for essentially the same thing as the "
+    "user's current message. If none of them do, choose \"none\" -- a wrong "
+    "match is worse than no match.\n\n"
+    "Use the conversation history only to understand what the current "
+    "message refers to, not as a question in its own right."
+)
+
+_SELECT_EXAMPLE_USER_PROMPT_TEMPLATE = (
+    "Candidate stored questions:\n{candidates}\n\n"
+    "{history_context}"
+    "User's current message: {user_message}\n\n"
+    "Reply with the index of the one candidate that matches the current "
+    "message in meaning, or \"none\" if none is a real match."
 )
 
 
@@ -69,11 +100,16 @@ class ContextGatherer:
         conversation = self.conversation_service.get_conversation_unlocked(conversation_id)
         summary = conversation.summary if conversation else None
 
-        similar_examples = self.bm25_service.find_similar_questions(user_message, top_k=1)
-
-        # Fetch history first so we can use it to determine topics
+        # Fetch history first so we can use it to determine topics and to
+        # disambiguate the example re-rank below.
         recent_messages = await self.conversation_service.get_recent_messages(conversation_id)
         doc_topic_list, scenario_topic_list = await self._find_topic(user_message, recent_messages)
+
+        # BM25 ranks by keyword overlap, so its top hit is often a generic
+        # row that shares words but not meaning. Pull a few candidates and
+        # let the model keep the one that genuinely matches, or none.
+        bm25_candidates = self.bm25_service.find_similar_questions(user_message, top_k=_EXAMPLE_CANDIDATE_COUNT)
+        similar_examples = self._select_relevant_example(bm25_candidates, recent_messages, user_message)
 
         doc_reference_section = self._get_doc_references(doc_topic_list)
         scenario_reference_section = self._get_scenario_references(scenario_topic_list)
@@ -231,6 +267,59 @@ class ContextGatherer:
                 references.append(f"{topic}:\n{reference}")
 
         return "\n\n".join(references) if references else "No scenario reference available."
+
+    # --- Similar-example re-rank ---
+
+    def _select_relevant_example(self, candidates: list[dict], recent_messages: list | None, user_message: str) -> list[dict]:
+        """
+        Asks Gemini which BM25 candidate (if any) matches the current message in meaning, guarding against keyword-overlap false positives.
+
+        Parameters:
+        - candidates (list[dict]): BM25 hits as {question, answer, score}, best-first — comes from gather
+        - recent_messages (list | None): recent conversation history, used only to disambiguate what the current message refers to — comes from gather
+        - user_message (str): the user's current message — comes from gather
+
+        Returns:
+        - list[dict]: the single kept candidate as a one-item list (same shape as before, so PromptBuilder is unchanged), or [] if the model rejects them all — goes to gather as context["similar_examples"]
+        """
+        if not candidates:
+            return []
+
+        candidates_str = "\n\n".join(
+            f"[{i}] {c['question']}" for i, c in enumerate(candidates)
+        )
+        history_context = ""
+        if recent_messages:
+            history_context = "Conversation so far:\n" + prepare_history(recent_messages[-8:], None) + "\n\n"
+
+        # STRING enum (not INTEGER) to match _select_relevant_topics' proven
+        # schema shape: the valid indices as strings, plus "none".
+        choices = [str(i) for i in range(len(candidates))] + ["none"]
+        schema = {"type": "STRING", "enum": choices}
+
+        user_prompt = _SELECT_EXAMPLE_USER_PROMPT_TEMPLATE.format(
+            candidates=candidates_str,
+            history_context=history_context,
+            user_message=user_message
+        )
+
+        response = self.gemini_service.call_model_structured(
+            model_name="gemini-3.5-flash-lite",
+            user_prompt=user_prompt,
+            system_prompt=_SELECT_EXAMPLE_SYSTEM_PROMPT,
+            schema=schema
+        )
+
+        if not isinstance(response, str) or not response.isdigit():
+            if response != "none":
+                logger.debug("_select_relevant_example returned %r, expected a digit index or 'none'", response)
+            return []
+        idx = int(response)
+        if idx < 0 or idx >= len(candidates):
+            logger.debug("_select_relevant_example returned out-of-range index %d for %d candidates", idx, len(candidates))
+            return []
+        logger.debug("_select_relevant_example kept [%d] %r out of %d BM25 candidates", idx, candidates[idx]["question"], len(candidates))
+        return [candidates[idx]]
 
     # --- Topic Selection ---
 

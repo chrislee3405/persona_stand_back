@@ -30,7 +30,7 @@ class Message(Base):
     message_id = Column(Integer, primary_key=True, index=True)
     conversation_id = Column(String, ForeignKey("conversation.conversation_id"), nullable=False, index=True)
     order_index = Column(Integer, nullable=False)   # 0, 1, 2... strictly increasing per conversation
-    sender = Column(String, nullable=False)          # 'user' | 'backend' | 'error' | 'regen'
+    sender = Column(String, nullable=False)          # 'user' | 'backend' | 'system' | 'error' | 'regen'
     text = Column(Text, nullable=False)
     selected_scenario = Column(String, nullable=True)
     selected_document = Column(String, nullable=True)

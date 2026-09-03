@@ -3,13 +3,14 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-def prepare_history(recent_messages: list | None, summary: str | None) -> str:
+def prepare_history(recent_messages: list | None, summary: str | None, assistant_label: str = "Assistant") -> str:
     """
     Formats the conversation summary and recent messages into one history section for prompts.
 
     Parameters:
     - recent_messages (list | None): messages since the last summary — comes from the caller (PromptBuilder, ResponseGate)
     - summary (str | None): the conversation's running summary — comes from the caller
+    - assistant_label (str): how to label the persona's own past turns. PromptBuilder passes "You" so the model reads them as its own prior messages (continuity); ResponseGate keeps the default "Assistant" since its auditor is a third party.
 
     Returns:
     - str: the formatted history text — goes to the caller for use in a prompt
@@ -21,7 +22,7 @@ def prepare_history(recent_messages: list | None, summary: str | None) -> str:
     summary_part = f"Summary of earlier conversation:\n{summary}" if summary else None
     recent_part = (
         "\n".join(
-            f"{'User' if m.sender == 'user' else 'Assistant'}: {m.text}"
+            f"{'User' if m.sender == 'user' else assistant_label}: {m.text}"
             for m in recent_messages
         )
         if recent_messages

@@ -9,7 +9,7 @@ from app.services.bm25_service import BM25Service
 from app.services.conversation_manage_service import ConversationService
 from app.services.model_collarborate.context_gatherer import ContextGatherer
 from app.services.model_collarborate.prompt_builder import PromptBuilder
-from app.services.model_collarborate.response_gate import ResponseGate
+from app.services.model_collarborate.response_gate import ResponseGate, FALLBACK_RESPONSES
 from app.services.model_collarborate.response_parser import ResponseParser
 from app.services.rate_control_service import RateTier
 
@@ -79,8 +79,15 @@ class ModelCollaborateService:
         # 4a. response consistency verification
         final_response = await self.response_gate.check(context, user_message, ai_response, system_prompt, user_prompt, conversation_id, session_id, regen_counter=_REGEN_COUNTER[tier])
 
-        # 4b. response parsing into several display turns
-        response_turns = self.response_parser.parse(final_response)
+        # 4b. response parsing into several display turns. Skip it for the
+        #     response-gate fallback: that's a single system notice (rendered
+        #     as one centred bubble, sender "system"), not a persona sending
+        #     several texts -- splitting it would just cost an extra Gemini
+        #     call to no benefit.
+        if final_response in FALLBACK_RESPONSES:
+            response_turns = [final_response]
+        else:
+            response_turns = self.response_parser.parse(final_response)
 
         return final_response, response_turns, context["doc_topic_list"], context["scenario_topic_list"]
 

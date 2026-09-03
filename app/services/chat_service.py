@@ -6,6 +6,7 @@ from fastapi import BackgroundTasks, Depends
 from app.services.consent_service import ConsentService
 from app.services.conversation_manage_service import ConversationService, ConversationNotFoundError, ConversationAccessDeniedError
 from app.services.model_collarborate_service import ModelCollaborateService
+from app.services.model_collarborate.response_gate import FALLBACK_RESPONSES
 from app.services.privacy_gate_service import PrivacyGateService
 from app.services.rate_control_service import RateControlService, RateTier, get_rate_control_service, TooManyPendingMessagesFromIpError
 from app.services.model_collarborate.summarization_service import SummarizationService
@@ -174,16 +175,21 @@ class ChatService:
                     )
                     return {
                         "turns": ["Sorry, something went wrong while generating a response. Please try again."],
-                        "sender": "backend",
+                        "sender": "system",
                         "conversationId": conversation_id
                     }
 
-                #       3. Persist the backend's reply
+                #       3. Persist the backend's reply. A reply that is the
+                #          ResponseGate fallback (every regen attempt still
+                #          failed verification) is a system notice, not a
+                #          persona turn -- tag it "system" so the frontend
+                #          renders it as a centred notice bubble.
+                reply_sender = "system" if reply_text in FALLBACK_RESPONSES else "backend"
                 await self.conversation_service.append_message(
                     conversation_id=conversation_id,
                     code=code,
                     session_id=session_id,
-                    sender="backend",
+                    sender=reply_sender,
                     text=reply_text,
                     selected_document=_join_topics(selected_doc_topics),
                     selected_scenario=_join_topics(selected_scenario_topics)
@@ -198,7 +204,7 @@ class ChatService:
 
                 return {
                     "turns": reply_turns,
-                    "sender": "backend",
+                    "sender": reply_sender,
                     "conversationId": conversation_id  # frontend captures this on first message
                 }
         finally:
