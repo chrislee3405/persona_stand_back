@@ -9,7 +9,7 @@ from app.services.bm25_service import BM25Service
 from app.services.conversation_manage_service import ConversationService
 from app.services.model_collarborate.context_gatherer import ContextGatherer
 from app.services.model_collarborate.prompt_builder import PromptBuilder
-from app.services.model_collarborate.response_gate import ResponseGate, FALLBACK_RESPONSES
+from app.services.model_collarborate.response_gate import ResponseGate, is_fallback_response
 from app.services.model_collarborate.response_parser import ResponseParser
 from app.services.rate_control_service import RateTier
 
@@ -84,7 +84,7 @@ class ModelCollaborateService:
         #     as one centred bubble, sender "system"), not a persona sending
         #     several texts -- splitting it would just cost an extra Gemini
         #     call to no benefit.
-        if final_response in FALLBACK_RESPONSES:
+        if is_fallback_response(final_response):
             response_turns = [final_response]
         else:
             response_turns = self.response_parser.parse(final_response)

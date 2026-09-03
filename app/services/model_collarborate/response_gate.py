@@ -17,7 +17,7 @@ _VERIFY_NATURAL_RESPONSE_SYSTEM_PROMPT_TEMPLATE = (
     "- [unnatural] The AI response should read as natural, from a normal person's perspective.\n"
     "- [asked_for_private_info] The AI response should not ask the user to input any credential or private information.\n"
     "- [made_a_promise] The AI response should not make any promise to the user.\n"
-    "- [punctuation] The AI response should use ordinary human punctuation matching the persona's habits (periods, commas, question marks, apostrophes, quotation marks, $/%), not tells of AI writing: no emoji, markdown or markup (**, [], <>, backticks, #), bullet or numbered lists, section labels, semicolons in casual chat, or filler ellipses. An exclamation mark is fine in a short exclamation or greeting (\"Hello!\", \"Congratulations!\") but not inside a longer sentence or paragraph.\n"
+    "- [punctuation] Ordinary human punctuation is fine: periods, commas, question marks, apostrophes, quotation marks, colons (including clock times like \"9:07 AM\" and ratios), parentheses, hyphens in compound words (\"hands-on\"), and $/%. Do NOT reject a mark just because it is not on that list. Reject ONLY these AI-writing tells: emoji; markdown or markup (**, [], <>, backticks, #); bullet or numbered lists; a colon used to head a label or section (\"Skills:\", \"Overview:\"); semicolons in casual chat; filler ellipses; em or en dashes (—, –) or double hyphens (--) used as sentence punctuation for an aside, an appositive, or a dramatic pause (e.g. reject \"teamwork—skills I know are huge\"); an exclamation mark inside a longer sentence or paragraph (a lone \"Hello!\" or \"Congratulations!\" is fine); and a closing full stop on a bare greeting or acknowledgement that is the entire reply (\"Hi.\", \"Hey there.\", \"Yeah.\", \"Sure thing.\", \"Thanks.\", \"No worries.\") -- real people drop the period on messages that short, so reject it. This last one does NOT apply to a brief factual answer that happens to be short (\"It's 9:07.\" or \"About three years.\" keep their period), nor to a reply of a full sentence or longer.\n"
     "- [contradiction] The AI response should not contradict facts the persona already stated earlier in this conversation.\n\n"
     "If the response breaks no rule, return \"<pass>\" as result, \"<pass>\" as reason, \"<pass>\" as quote, and \"none\" as category.\n\n"
     "If the response breaks a rule, return the reject type as result:\n"
@@ -37,41 +37,49 @@ _VERIFY_NATURAL_RESPONSE_USER_PROMPT_TEMPLATE = (
 )
 
 # Shown to the user when every regenerate-then-verify attempt still fails
-# the natural-response check. The generic default; check() swaps in a
-# reason-specific variant from _FALLBACK_BY_CATEGORY below when the last
-# rejection has a category worth naming.
-FALLBACK_RESPONSE = (
-    "Sorry, I'm having trouble forming a suitable response right now. "
-    "Please try rephrasing your message."
-)
+# the natural-response check. check() appends the reasons it actually hit
+# (see _build_fallback), so e.g. "... It kept breaking character and using
+# punctuation or formatting that isn't allowed here. ...".
+_FALLBACK_LEAD = "Sorry, I couldn't put together a suitable reply."
+_FALLBACK_TAIL = "Please try rephrasing your message."
 
-# Category (from the auditor's `category` field) -> a fallback message that
-# says WHY the reply was withheld. Categories not listed here (unnatural,
-# punctuation) fall back to the generic FALLBACK_RESPONSE -- telling a user
-# "my reply had bad punctuation" isn't useful.
-_FALLBACK_BY_CATEGORY = {
-    "asked_for_private_info": (
-        "Sorry, I can't send that reply -- it would have asked you for "
-        "personal or private information. Please try rephrasing your message."
-    ),
-    "made_a_promise": (
-        "Sorry, I can't send that reply -- it made a commitment it "
-        "shouldn't. Please try rephrasing your message."
-    ),
-    "broke_character": (
-        "Sorry, I couldn't put together a natural in-character reply to "
-        "that. Please try rephrasing your message."
-    ),
-    "contradiction": (
-        "Sorry, I couldn't form a reply that stays consistent with what "
-        "has already been said. Please try rephrasing your message."
-    ),
+# One broken-rule category -> a short phrase for the user-facing fallback.
+_REJECT_PHRASE = {
+    "broke_character": "breaking character",
+    "unnatural": "sounding unnatural",
+    "asked_for_private_info": "asking you for personal information",
+    "made_a_promise": "making a promise it shouldn't",
+    "punctuation": "using punctuation or formatting that isn't allowed here",
+    "contradiction": "contradicting something said earlier in the conversation",
 }
 
-# Every string check() can return as a withheld-reply notice. chat_service
-# and model_orchestration test membership here to mark the outgoing message
-# "system" (a centred bubble) rather than a "backend" persona turn.
-FALLBACK_RESPONSES = frozenset({FALLBACK_RESPONSE, *_FALLBACK_BY_CATEGORY.values()})
+
+def _build_fallback(categories: list[str]) -> str:
+    """
+    Composes the withheld-reply notice, naming the distinct rejection categories that were hit across the attempts.
+
+    Parameters:
+    - categories (list[str]): the `category` of every grounded rejection, in order -- comes from ResponseGate.check
+
+    Returns:
+    - str: the user-facing notice; always starts with _FALLBACK_LEAD so is_fallback_response can recognise it
+    """
+    seen: list[str] = []
+    for c in categories:
+        if c in _REJECT_PHRASE and c not in seen:
+            seen.append(c)
+    phrases = [_REJECT_PHRASE[c] for c in seen]
+    if not phrases:
+        return f"{_FALLBACK_LEAD} {_FALLBACK_TAIL}"
+    joined = phrases[0] if len(phrases) == 1 else f"{', '.join(phrases[:-1])} and {phrases[-1]}"
+    return f"{_FALLBACK_LEAD} It kept {joined}. {_FALLBACK_TAIL}"
+
+
+def is_fallback_response(text: str) -> bool:
+    """
+    True if `text` is one of check()'s withheld-reply notices (any reason variant). chat_service / model_orchestration use this to mark the outgoing message "system" rather than a "backend" persona turn.
+    """
+    return text.startswith(_FALLBACK_LEAD)
 
 
 class ResponseGate:
@@ -163,7 +171,7 @@ class ResponseGate:
         - regen_counter (int): max verify-then-regenerate attempts — comes from model_orchestration, resolved from ModelCollaborateService's per-tier _REGEN_COUNTER hyperparameter (a request's tier isn't known until then, so this isn't fixed at ResponseGate construction)
 
         Returns:
-        - str: a response that passed verification, or a fallback notice if it's still rejected after regen_counter attempts — the fallback is reason-specific when the last rejection has a nameable category (see _FALLBACK_BY_CATEGORY), otherwise the generic FALLBACK_RESPONSE — goes to model_orchestration
+        - str: a response that passed verification, or a fallback notice (built by _build_fallback, naming every rejection category hit across the attempts) if it's still rejected after regen_counter attempts — goes to model_orchestration
         """
         recent_conversation_part = ""
         if context["recent_messages"]:
@@ -175,9 +183,9 @@ class ResponseGate:
         # attempt 3's regen prompt would only know about attempt 2's reason
         # and could reintroduce whatever attempt 1 already got rejected for.
         reject_history: list[str] = []
-        # Category of the most recent grounded rejection -- picks the
-        # fallback wording if every attempt is exhausted.
-        last_category = "none"
+        # The `category` of every grounded rejection, in order -- the
+        # exhausted-attempts fallback names the distinct ones it saw.
+        reject_categories: list[str] = []
         for attempt in range(regen_counter):
             result, reason, quote, category = self._verify_response(recent_conversation_part, user_message, current_response)
 
@@ -206,7 +214,7 @@ class ResponseGate:
                 attempt + 1, regen_counter, result, category, reason
             )
 
-            last_category = category
+            reject_categories.append(category)
             reject_history.append(f"Attempt {attempt + 1} ({result}, {category}): {reason}")
             reject_history_text = "\n".join(reject_history)
 
@@ -250,10 +258,10 @@ class ResponseGate:
                 system_prompt=regen_system_prompt
             )
 
-        fallback_response = _FALLBACK_BY_CATEGORY.get(last_category, FALLBACK_RESPONSE)
+        fallback_response = _build_fallback(reject_categories)
         logger.warning(
-            "ResponseGate.check exhausted %d attempts (last category: %s) -- returning fallback response.",
-            regen_counter, last_category
+            "ResponseGate.check exhausted %d attempts (categories: %s) -- returning fallback response.",
+            regen_counter, reject_categories
         )
         await self.conversation_service.append_message(
             conversation_id=conversation_id,

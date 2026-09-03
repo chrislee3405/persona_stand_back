@@ -6,7 +6,7 @@ from fastapi import BackgroundTasks, Depends
 from app.services.consent_service import ConsentService
 from app.services.conversation_manage_service import ConversationService, ConversationNotFoundError, ConversationAccessDeniedError
 from app.services.model_collarborate_service import ModelCollaborateService
-from app.services.model_collarborate.response_gate import FALLBACK_RESPONSES
+from app.services.model_collarborate.response_gate import is_fallback_response
 from app.services.privacy_gate_service import PrivacyGateService
 from app.services.rate_control_service import RateControlService, RateTier, get_rate_control_service, TooManyPendingMessagesFromIpError
 from app.services.model_collarborate.summarization_service import SummarizationService
@@ -184,7 +184,7 @@ class ChatService:
                 #          failed verification) is a system notice, not a
                 #          persona turn -- tag it "system" so the frontend
                 #          renders it as a centred notice bubble.
-                reply_sender = "system" if reply_text in FALLBACK_RESPONSES else "backend"
+                reply_sender = "system" if is_fallback_response(reply_text) else "backend"
                 await self.conversation_service.append_message(
                     conversation_id=conversation_id,
                     code=code,
