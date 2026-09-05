@@ -14,10 +14,17 @@ def setup_middleware(app: FastAPI) -> None:
     Returns:
     - None: configures `app` in place by registering CORSMiddleware and SessionMiddleware
     """
-    # Define the exact frontend URLs allowed to make API calls to this backend
+    # NOT the path development or production actually uses. Both run the
+    # frontend behind nginx (persona_stand_front/nginx.conf), which proxies
+    # /api/ to this backend, so every browser request is SAME-ORIGIN and
+    # never triggers a CORS preflight at all. `npm run dev` (Vite on 5173
+    # talking cross-origin to :8000) is not a supported setup -- the Vite
+    # config has no /api proxy. This list is kept only so that a direct
+    # cross-origin frontend would work if one is ever introduced; if you are
+    # wondering why editing it changes nothing, that is why.
     origins = [
         "http://localhost:80",
-        "http://localhost:5173",  # Local Vite React frontend
+        "http://localhost:5173",  # unused: see the note above
     ]
 
     app.add_middleware(

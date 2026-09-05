@@ -30,3 +30,6 @@ Thumbs.db
 
 # 6. GCP related
 adc.json
+# 9. Local test harnesses (may reference personal reference data)
+ablation_test.py
+naturalness_test.py

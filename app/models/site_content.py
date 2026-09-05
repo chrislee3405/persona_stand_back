@@ -150,10 +150,10 @@ class SiteContent(Base):
       "email":    "<string>",          # rendered as a mailto link (required)
       "intro":    "<string>",     ?    # short line above the details
       "location": "<string>",     ?    # e.g. "Brisbane, Australia"
-      "links": [                  ?    # social links; the footer shows the
-        { "label": "<string>",         #   LinkedIn / GitHub ones, matched by
-          "href":  "<string>" }        #   label containing "linkedin" /
-      ]                                #   "github" (case-insensitive)
+      "links": [                  ?    # social links, rendered in the
+        { "label": "<string>",         #   Contact section. A link whose
+          "href":  "<string>" }        #   label contains "linkedin" or
+      ]                                #   "github" also gets its icon.
     }
 
     Media is NEVER stored in this table (nor in `site_journey` /

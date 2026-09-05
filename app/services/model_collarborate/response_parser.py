@@ -2,6 +2,7 @@ import logging
 
 from fastapi import Depends
 
+from app.constants import DEFAULT_MODEL
 from app.services.ai.gemini_service import GeminiService
 
 logger = logging.getLogger(__name__)
@@ -66,7 +67,7 @@ class ResponseParser:
         }
 
         response = self.gemini_service.call_model_structured(
-            model_name="gemini-3.5-flash-lite",
+            model_name=DEFAULT_MODEL,
             user_prompt=user_prompt,
             system_prompt=system_prompt,
             schema=schema

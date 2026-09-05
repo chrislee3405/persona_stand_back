@@ -3,9 +3,11 @@ import traceback
 
 from fastapi import BackgroundTasks, Depends
 
+from app.constants import Sender
 from app.services.consent_service import ConsentService
 from app.services.conversation_manage_service import ConversationService, ConversationNotFoundError, ConversationAccessDeniedError
 from app.services.model_collarborate_service import ModelCollaborateService
+from app.services.model_collarborate.response_gate import is_fallback_response
 from app.services.privacy_gate_service import PrivacyGateService
 from app.services.rate_control_service import RateControlService, RateTier, get_rate_control_service, TooManyPendingMessagesFromIpError
 from app.services.model_collarborate.summarization_service import SummarizationService
@@ -81,7 +83,7 @@ class ChatService:
         - client_ip (str): the caller's client IP — comes from the router (get_client_ip), used only for the rate control gate's per-IP backstop (guest sessions only, see below)
 
         Returns:
-        - dict: reply split into display turns, sender, and conversationId — goes back to the router as the response body
+        - dict: reply split into display turns, sender, conversationId, and userMessageKept — goes back to the router as the response body. userMessageKept is False only when the reply is the ResponseGate fallback, because _drop_withheld_turns then discards the user's message along with it; the frontend reads it to mark that bubble as not part of the conversation.
 
         """
         ### message length gate ###
@@ -145,7 +147,7 @@ class ChatService:
                         conversation_id=conversation_id,
                         code=code,
                         session_id=session_id,
-                        sender="user",
+                        sender=Sender.USER,
                         text=user_text
                     )
                 except (ConversationNotFoundError, ConversationAccessDeniedError):
@@ -153,7 +155,7 @@ class ChatService:
                         conversation_id=None,
                         code=code,
                         session_id=session_id,
-                        sender="user",
+                        sender=Sender.USER,
                         text=user_text
                     )
 
@@ -169,21 +171,32 @@ class ChatService:
                         conversation_id=conversation_id,
                         code=code,
                         session_id=session_id,
-                        sender="error",
+                        sender=Sender.ERROR,
                         text=traceback.format_exc()
                     )
                     return {
                         "turns": ["Sorry, something went wrong while generating a response. Please try again."],
-                        "sender": "backend",
-                        "conversationId": conversation_id
+                        "sender": Sender.SYSTEM,
+                        "conversationId": conversation_id,
+                        # The row appended above is sender="error", which
+                        # get_recent_messages drops in SQL WITHOUT touching the
+                        # user row beside it. So this message is still part of
+                        # the conversation and the persona will see it next
+                        # turn -- it is not withheld, only unanswered.
+                        "userMessageKept": True
                     }
 
-                #       3. Persist the backend's reply
+                #       3. Persist the backend's reply. A reply that is the
+                #          ResponseGate fallback (every regen attempt still
+                #          failed verification) is a system notice, not a
+                #          persona turn -- tag it "system" so the frontend
+                #          renders it as a centred notice bubble.
+                reply_sender = Sender.SYSTEM if is_fallback_response(reply_text) else Sender.BACKEND
                 await self.conversation_service.append_message(
                     conversation_id=conversation_id,
                     code=code,
                     session_id=session_id,
-                    sender="backend",
+                    sender=reply_sender,
                     text=reply_text,
                     selected_document=_join_topics(selected_doc_topics),
                     selected_scenario=_join_topics(selected_scenario_topics)
@@ -198,8 +211,16 @@ class ChatService:
 
                 return {
                     "turns": reply_turns,
-                    "sender": "backend",
-                    "conversationId": conversation_id  # frontend captures this on first message
+                    "sender": reply_sender,
+                    "conversationId": conversation_id,  # frontend captures this on first message
+                    # A "system" reply is the ResponseGate fallback, and
+                    # ConversationService._drop_withheld_turns removes it
+                    # TOGETHER WITH the user message it answered -- so that
+                    # message is persisted but is no longer part of the
+                    # conversation. The frontend cannot infer this from
+                    # `sender` alone (the error path above is also "system"
+                    # yet keeps its user message), so say it outright.
+                    "userMessageKept": reply_sender != Sender.SYSTEM
                 }
         finally:
             # Only release what was actually reserved above -- releasing

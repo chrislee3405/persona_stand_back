@@ -2,6 +2,7 @@ import uuid
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from fastapi import Depends
+from app.constants import GUEST_CODE, NON_PROMPT_SENDERS, Sender
 from app.database import get_db
 from app.models import conversation as conversation_models
 
@@ -87,7 +88,7 @@ class ConversationService:
         Inserts a new conversation row owned by the given session.
 
         Parameters:
-        - code (str | None): invite code to store, defaults to "GUEST" — comes from the caller
+        - code (str | None): invite code to store, defaults to GUEST_CODE — comes from the caller
         - session_id (str): the owning session — comes from the caller
 
         Returns:
@@ -95,7 +96,7 @@ class ConversationService:
         """
         entry = conversation_models.Conversation(
             conversation_id=str(uuid.uuid4()),
-            code=code or "GUEST",
+            code=code or GUEST_CODE,
             owner_session_id=session_id
         )
         self.db.add(entry)
@@ -149,14 +150,16 @@ class ConversationService:
 
     async def get_recent_messages(self, conversation_id: str, exclude_last: bool = True) -> list[conversation_models.Message]:
         """
-        Fetches messages after the conversation's last_summarized_index checkpoint, excluding sender="error" and sender="regen" rows.
+        Fetches the messages after the conversation's last_summarized_index checkpoint that are genuinely part of the conversation, dropping failed and withheld turns.
 
         Parameters:
         - conversation_id (str): the conversation to fetch messages for — comes from the caller
         - exclude_last (bool): drop the most recently persisted message, defaults to True — comes from the caller
 
         Returns:
-        - list[Message]: non-error, non-regen messages after last_summarized_index, oldest first — goes to the caller (e.g. ModelCollaborateService, SummarizationService). sender="error" rows (logged when model_orchestration fails, or when ResponseGate.check exhausts its retries) and sender="regen" rows (rejected intermediate attempts logged by ResponseGate.check) are always excluded, both from live prompt history and from summarization, so a failed or discarded turn never shows up as a fake prior reply.
+        - list[Message]: the real conversation after last_summarized_index, oldest first — goes to the caller (e.g. ContextGatherer, SummarizationService). Three kinds of row are removed, so no failed or discarded turn can reappear as if it were a real exchange:
+          - sender="error" (a turn that raised, or ResponseGate.check exhausting its retries) and sender="regen" (rejected intermediate attempts) are excluded in SQL via NON_PROMPT_SENDERS;
+          - sender="system" (the ResponseGate fallback notice: "Sorry, I couldn't put together a suitable reply...") is dropped in Python, TOGETHER WITH the user message it answered. A fallback means the persona never actually replied, so leaving either behind poisons the next prompt -- the notice gets read back as the persona's own words ('You: Sorry, I couldn't...'), and the unanswered question looks like it was already dealt with. Handled here rather than in the SQL filter precisely because the pairing needs the system row to still be visible.
         """
         conversation = self.get_conversation_locked(conversation_id)
         if conversation is None:
@@ -167,14 +170,38 @@ class ConversationService:
             .filter(
                 conversation_models.Message.conversation_id == conversation_id,
                 conversation_models.Message.order_index > conversation.last_summarized_index,
-                conversation_models.Message.sender.notin_(["error", "regen"]))
+                conversation_models.Message.sender.notin_(NON_PROMPT_SENDERS))
             .order_by(conversation_models.Message.order_index.asc())
             .all())
+
+        recent_messages = self._drop_withheld_turns(recent_messages)
 
         if exclude_last and recent_messages:
             recent_messages = recent_messages[:-1]
 
         return recent_messages
+
+    @staticmethod
+    def _drop_withheld_turns(messages: list[conversation_models.Message]) -> list[conversation_models.Message]:
+        """
+        Removes each system notice and the user message it replaced, leaving only turns the persona actually took part in.
+
+        Parameters:
+        - messages (list[Message]): rows in order_index order, already free of error/regen rows — comes from get_recent_messages
+
+        Returns:
+        - list[Message]: the same list minus every sender="system" row and the sender="user" row immediately before it. Runs in one pass, so consecutive withheld turns are each paired off correctly.
+        """
+        kept: list[conversation_models.Message] = []
+        for message in messages:
+            if message.sender == Sender.SYSTEM:
+                # The question this notice stood in for never got an answer,
+                # so it is not part of the conversation either.
+                if kept and kept[-1].sender == Sender.USER:
+                    kept.pop()
+                continue
+            kept.append(message)
+        return kept
 
     async def mark_summarized_up_to(self, conversation_id: str, order_index: int, summary_text: str | None = None) -> None:
         """
@@ -214,9 +241,8 @@ class ConversationService:
         conversation = self.get_conversation_locked(conversation_id)
         if conversation is None:
             return
-        if conversation.owner_session_id != session_id:
-            raise ConversationAccessDeniedError()
-        if conversation.code and conversation.code != "GUEST" and conversation.code != code:
+        self.assert_ownership(conversation, session_id)
+        if conversation.code and conversation.code != GUEST_CODE and conversation.code != code:
             # Already upgraded with a different code — re-submitting the
             # SAME code is a harmless no-op below, but switching to a
             # different one would silently swap which invite code this

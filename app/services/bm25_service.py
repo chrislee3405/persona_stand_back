@@ -233,7 +233,7 @@ class BM25Service:
         - none
 
         Returns:
-        - dict | None: {"documents": [{"question", "answer", "term_freqs", "size"}, ...], "avg_doc_length", "df_dict", "idf_dict"}, or None if question_bank is empty — goes to _get_corpus, which caches it in memory and persists it to corpus_cache
+        - dict | None: {"documents": [{"question", "answer", "term_freqs", "size"}, ...], "avg_doc_length", "idf_dict"}, or None if question_bank is empty — goes to _get_corpus, which caches it in memory and persists it to corpus_cache
         """
         rows = self._load_all()
         if not rows:
@@ -254,10 +254,14 @@ class BM25Service:
         df_dict = _document_frequency([doc["term_freqs"] for doc in documents])
         idf_dict = _compute_idf(df_dict, ndocs=len(rows))
 
+        # df_dict is an intermediate for _compute_idf only -- it is never read
+        # back by find_similar_questions, so it is deliberately NOT stored:
+        # keeping it bloated every cached corpus row by roughly the vocabulary
+        # size for nothing. Older corpus_cache rows may still contain it; the
+        # extra key is simply ignored on read.
         return {
             "documents": documents,
             "avg_doc_length": avg_doc_length,
-            "df_dict": df_dict,
             "idf_dict": idf_dict
         }
 
@@ -327,12 +331,6 @@ class BM25Service:
             scored.append((doc, score))
 
         scored.sort(key=lambda pair: pair[1], reverse=True)
-
-        logger.debug(
-            "BM25 scores for %r: %s",
-            user_message,
-            [(doc["question"], round(score, 4)) for doc, score in scored]
-        )
 
         results = []
         for doc, score in scored[:top_k]:
