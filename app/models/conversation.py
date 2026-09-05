@@ -1,6 +1,7 @@
 from sqlalchemy import Column, Integer, String, Text, ForeignKey, UniqueConstraint, DateTime
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
+from app.constants import GUEST_CODE
 from app.database import Base
 
 
@@ -10,7 +11,7 @@ class Conversation(Base):
     conversation_id = Column(String, primary_key=True)  # backend-generated UUID (see ConversationService)
     owner_session_id = Column(String, nullable=True, index=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
-    code = Column(String, nullable=True, default="GUEST")
+    code = Column(String, nullable=True, default=GUEST_CODE)
     last_summarized_index = Column(Integer, nullable=False, default=-1)
     summary = Column(Text, nullable=True)  # running summary, appended every N pairs
 
@@ -30,7 +31,7 @@ class Message(Base):
     message_id = Column(Integer, primary_key=True, index=True)
     conversation_id = Column(String, ForeignKey("conversation.conversation_id"), nullable=False, index=True)
     order_index = Column(Integer, nullable=False)   # 0, 1, 2... strictly increasing per conversation
-    sender = Column(String, nullable=False)          # 'user' | 'backend' | 'system' | 'error' | 'regen'
+    sender = Column(String, nullable=False)          # one of app.constants.Sender
     text = Column(Text, nullable=False)
     selected_scenario = Column(String, nullable=True)
     selected_document = Column(String, nullable=True)

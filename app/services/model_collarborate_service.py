@@ -3,11 +3,13 @@ import logging
 from fastapi import Depends
 from sqlalchemy.orm import Session
 
+from app.constants import DEFAULT_MODEL
 from app.database import get_db
 from app.services.ai.gemini_service import GeminiService
 from app.services.bm25_service import BM25Service
 from app.services.conversation_manage_service import ConversationService
 from app.services.model_collarborate.context_gatherer import ContextGatherer
+from app.services.model_collarborate.grounding_service import GroundingService
 from app.services.model_collarborate.prompt_builder import PromptBuilder
 from app.services.model_collarborate.response_gate import ResponseGate, is_fallback_response
 from app.services.model_collarborate.response_parser import ResponseParser
@@ -46,17 +48,18 @@ class ModelCollaborateService:
         - conversation_service (ConversationService): reads/writes conversation state — injected by FastAPI
 
         Returns:
-        - None: sets self.gemini_service and the four composed sub-services (self.context_gatherer, self.prompt_builder, self.response_gate, self.response_parser)
+        - None: sets self.gemini_service and the five composed sub-services (self.context_gatherer, self.grounding_service, self.prompt_builder, self.response_gate, self.response_parser)
         """
         self.gemini_service = gemini_service
         self.context_gatherer = ContextGatherer(db, gemini_service, bm25_service, conversation_service)
+        self.grounding_service = GroundingService(gemini_service)
         self.prompt_builder = PromptBuilder()
         self.response_gate = ResponseGate(gemini_service, conversation_service)
         self.response_parser = ResponseParser(gemini_service, min_chars_per_turn=_MIN_CHARS_PER_TURN)
 
     async def model_orchestration(self, user_message: str, conversation_id: str, session_id: str, tier: RateTier) -> tuple[str, list[str], list[str], list[str]]:
         """
-        Gathers context, builds prompts, and generates the AI reply to a user message.
+        Gathers context, decides what may truthfully be said, and generates the AI reply to a user message.
 
         Parameters:
         - user_message (str): the user's current message — comes from conversations_router (guestchat/invitechat)
@@ -70,13 +73,17 @@ class ModelCollaborateService:
         # 1. Gather all necessary references and history
         context = await self.context_gatherer.gather(user_message, conversation_id)
 
-        # 2. Format the system and user prompts
-        system_prompt, user_prompt = self.prompt_builder.build(user_message, context)
+        # 2. Stage 1 -- decide what the reference material actually supports.
+        #    See prompt_builder for why this is a separate call.
+        grounding = self.grounding_service.ground(user_message, context)
 
-        # 3. Call the model to generate the response
-        ai_response = self._generate_ai_response(system_prompt, user_prompt)
+        # 3. Stage 2 -- write the reply from the approved facts only.
+        system_prompt, user_prompt = self.prompt_builder.build_reply(user_message, context, grounding)
+        ai_response = self._generate_reply(system_prompt, user_prompt)
 
-        # 4a. response consistency verification
+        # 4a. response consistency verification. The gate regenerates against
+        #     the STAGE 2 prompts, so a rejected reply is rewritten against the
+        #     same approved facts rather than re-grounded from scratch.
         final_response = await self.response_gate.check(context, user_message, ai_response, system_prompt, user_prompt, conversation_id, session_id, regen_counter=_REGEN_COUNTER[tier])
 
         # 4b. response parsing into several display turns. Skip it for the
@@ -91,23 +98,23 @@ class ModelCollaborateService:
 
         return final_response, response_turns, context["doc_topic_list"], context["scenario_topic_list"]
 
-    def _generate_ai_response(self, system_prompt: str, user_prompt: str) -> str:
+    def _generate_reply(self, system_prompt: str, user_prompt: str) -> str:
         """
-        Sends the finalized prompts to Gemini and returns the generated reply.
+        Stage 2: sends the finalized prompts to Gemini and returns the generated reply.
 
         Parameters:
-        - system_prompt (str): the system instruction — comes from self.prompt_builder.build
-        - user_prompt (str): the user prompt — comes from self.prompt_builder.build
+        - system_prompt (str): the system instruction — comes from self.prompt_builder.build_reply
+        - user_prompt (str): the user prompt — comes from self.prompt_builder.build_reply
 
         Returns:
         - str: the model's reply text — goes to model_orchestration
         """
-        logger.debug("=== Gemini call: model_orchestration ===")
+        logger.debug("=== Gemini call: reply (stage 2) ===")
         logger.debug("System prompt: %s", system_prompt)
         logger.debug("User prompt: %s", user_prompt)
 
         final_response = self.gemini_service.call_model(
-            model_name="gemini-3.5-flash-lite",
+            model_name=DEFAULT_MODEL,
             user_prompt=user_prompt,
             system_prompt=system_prompt
         )
