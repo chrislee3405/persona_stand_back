@@ -27,7 +27,16 @@ class SiteContent(Base):
     section = "personal_statement"      JSON OBJECT     Home -> About
     ------------------------------------------------------------------
     {
-      "heading":   "<string>",    ?   # small heading above the bio
+      "owner":     "<string>",    ?   # the site owner's NAME. Rendered as the
+                                      #   page's only <h1>, above the title.
+      "title":     "<string>",    ?   # professional title / role shown under
+                                      #   the name, e.g. "Full-stack Engineer".
+                                      #   Renamed from "heading"; the frontend
+                                      #   still falls back to "heading" when
+                                      #   "title" is absent, so an un-migrated
+                                      #   row keeps rendering. Write "title" on
+                                      #   every new row.
+      "heading":   "<string>",    ?   # DEPRECATED -- former name of "title".
       "body":      "<string>",        # bio paragraph (required)
       "cta": {                    ?   # call-to-action button
         "label":   "<string>",        #   button text
@@ -155,6 +164,23 @@ class SiteContent(Base):
           "href":  "<string>" }        #   label contains "linkedin" or
       ]                                #   "github" also gets its icon.
     }
+
+    ------------------------------------------------------------------
+    section = "chatroom"                JSON OBJECT     Chatroom header
+    ------------------------------------------------------------------
+    {
+      "name": "<string>"          ?   # the persona's display name, shown in
+                                      #   the chat header. Falls back to
+                                      #   personal_statement."owner", then to
+                                      #   a generic label, so this row is
+                                      #   optional -- add it only to show a
+                                      #   name different from the site
+                                      #   owner's.
+    }
+    # Header-only. The line under the name is live status
+    # (online / offline / "Typing...") and is NOT content. The header
+    # avatar is a fixed CDN object, not a site_image row (see AVATAR_URL
+    # in persona_stand_front/src/pages/Chatroom.tsx).
 
     Media is NEVER stored in this table (nor in `site_journey` /
     `site_project`). EVERY image AND video the site renders -- hero, section
