@@ -38,10 +38,18 @@ class SiteJourney(Base):
                   "subtitle": "<string>",   ?  # one italic line under it,
                                                #   e.g. place / role
                   "body":     "<string>",      # main text (required). Blank
-                                               #   lines -> paragraphs, same
-                                               #   as every other body field.
-                  "highlights": ["<string>", ...],  ?  # bullet list under
-                                                       #   the body
+                                               #   lines -> paragraphs; lines
+                                               #   starting "- " / "* " -> a
+                                               #   bullet list ("point form").
+                                               #   Same as every other body
+                                               #   field (<Prose>).
+                  "highlights": ["<string>", ...],  ?  # a SEPARATE curated
+                                                       #   bullet list, always
+                                                       #   rendered after the
+                                                       #   body -- use `body`
+                                                       #   bullets for point
+                                                       #   form within the
+                                                       #   overview itself
                   "links": [                  ?  # related links, rendered as
                     { "label": "<string>",       #   buttons at the bottom
                       "href":  "<string>" }

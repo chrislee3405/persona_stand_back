@@ -9,7 +9,7 @@ from app.services.conversation_manage_service import ConversationService, Conver
 from app.services.model_collarborate_service import ModelCollaborateService
 from app.services.model_collarborate.response_gate import is_fallback_response
 from app.services.privacy_gate_service import PrivacyGateService
-from app.services.rate_control_service import RateControlService, RateTier, get_rate_control_service, TooManyPendingMessagesFromIpError
+from app.services.rate_control_service import RateControlService, RateTier, get_rate_control_service, TooManyPendingMessagesFromIpError, DailyQuotaExceededError
 from app.services.model_collarborate.summarization_service import SummarizationService
 
 logger = logging.getLogger(__name__)
@@ -83,7 +83,7 @@ class ChatService:
         - client_ip (str): the caller's client IP — comes from the router (get_client_ip), used only for the rate control gate's per-IP backstop (guest sessions only, see below)
 
         Returns:
-        - dict: reply split into display turns, sender, conversationId, and userMessageKept — goes back to the router as the response body. userMessageKept is False only when the reply is the ResponseGate fallback, because _drop_withheld_turns then discards the user's message along with it; the frontend reads it to mark that bubble as not part of the conversation.
+        - dict: reply split into display turns, sender, conversationId, and userMessageKept — goes back to the router as the response body. userMessageKept is False in the two cases where the message was stored but is not part of the conversation the persona sees: the ResponseGate fallback (_drop_withheld_turns discards the user's message along with the notice), and a failed generation (the row is retagged Sender.NOT_SAVED_USER). The frontend reads it to mark that bubble as not answered.
 
         """
         ### message length gate ###
@@ -133,7 +133,10 @@ class ChatService:
         if tier == "guest":
             try:
                 self.rate_control_service.reserve_ip_slot(client_ip)
-            except TooManyPendingMessagesFromIpError:
+            except (TooManyPendingMessagesFromIpError, DailyQuotaExceededError):
+                # Both mean this request is not proceeding, so the session slot
+                # claimed just above has to go back. The session's DAILY unit is
+                # deliberately not refunded -- see RateControlService.reserve_slot.
                 self.rate_control_service.release_slot(session_id)
                 raise
 
@@ -143,7 +146,7 @@ class ChatService:
                 #       creating  conversation if conversation_id is None,
                 #       verifying conversation_id ownership.
                 try:
-                    _, conversation_id = await self.conversation_service.append_message(
+                    user_message, conversation_id = await self.conversation_service.append_message(
                         conversation_id=conversation_id,
                         code=code,
                         session_id=session_id,
@@ -151,7 +154,7 @@ class ChatService:
                         text=user_text
                     )
                 except (ConversationNotFoundError, ConversationAccessDeniedError):
-                    _, conversation_id = await self.conversation_service.append_message(
+                    user_message, conversation_id = await self.conversation_service.append_message(
                         conversation_id=None,
                         code=code,
                         session_id=session_id,
@@ -174,16 +177,24 @@ class ChatService:
                         sender=Sender.ERROR,
                         text=traceback.format_exc()
                     )
+                    # The user's message stays in the table -- the owner needs
+                    # to see what was being asked when the turn failed -- but
+                    # it is retagged out of Sender.USER so the next prompt does
+                    # not read it back as a question the persona has already
+                    # been asked and dealt with. Nothing ever answered it.
+                    await self.conversation_service.retag_message_sender(
+                        user_message, Sender.NOT_SAVED_USER
+                    )
                     return {
                         "turns": ["Sorry, something went wrong while generating a response. Please try again."],
                         "sender": Sender.SYSTEM,
                         "conversationId": conversation_id,
-                        # The row appended above is sender="error", which
-                        # get_recent_messages drops in SQL WITHOUT touching the
-                        # user row beside it. So this message is still part of
-                        # the conversation and the persona will see it next
-                        # turn -- it is not withheld, only unanswered.
-                        "userMessageKept": True
+                        # Retagged above, so it is no longer part of the
+                        # conversation the persona sees. The frontend renders
+                        # this as "not answered" rather than "not sent", which
+                        # is exactly right: the server did receive and store
+                        # it, and then failed to reply to it.
+                        "userMessageKept": False
                     }
 
                 #       3. Persist the backend's reply. A reply that is the

@@ -3,6 +3,18 @@
 .env
 .env.*
 !.env.example
+
+# GCP application-default credentials. Gitignored, but the Dockerfile does
+# `COPY . .`, and docker-compose.yml mounts a real ADC file to this path for
+# local development -- so without this line a local `docker build` bakes a
+# developer's live Google credentials into an image layer.
+adc.json
+
+# Local test harnesses. Gitignored for the same reason they are excluded here:
+# they may reference personal reference data, and they are not part of the
+# shipped application.
+ablation_test.py
+naturalness_test.py
 venv/
 .venv/
 env/

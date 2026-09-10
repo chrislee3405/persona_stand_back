@@ -110,7 +110,7 @@ class SummarizationService:
             messages_section=messages_section
         )
 
-        updated_summary = self.gemini_service.call_model(
+        updated_summary = await self.gemini_service.call_model(
             model_name=SUMMARY_MODEL,
             user_prompt=user_prompt,
             system_prompt=_SYSTEM_PROMPT

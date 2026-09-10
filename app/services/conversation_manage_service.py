@@ -148,6 +148,26 @@ class ConversationService:
         self.db.refresh(message)
         return message, conversation.conversation_id
 
+    async def retag_message_sender(self, message: conversation_models.Message, sender: str) -> None:
+        """
+        Changes an already-persisted message's `sender`, without touching its text.
+
+        Parameters:
+        - message (Message): the row to retag — comes from ChatService.handle_chat_turn, which holds the row it just inserted
+        - sender (str): the new sender value, one of app.constants.Sender — comes from the caller
+
+        Returns:
+        - None: updates the row in the database.
+
+        The one caller retags a stored USER message to Sender.NOT_SAVED_USER
+        when its turn failed before producing a reply. The row is kept so the
+        owner can see what was asked, and the retag is what removes it from the
+        next prompt's history -- get_recent_messages filters
+        NON_PROMPT_SENDERS in SQL, and NOT_SAVED_USER is in that tuple.
+        """
+        message.sender = sender
+        self.db.commit()
+
     async def get_recent_messages(self, conversation_id: str, exclude_last: bool = True) -> list[conversation_models.Message]:
         """
         Fetches the messages after the conversation's last_summarized_index checkpoint that are genuinely part of the conversation, dropping failed and withheld turns.

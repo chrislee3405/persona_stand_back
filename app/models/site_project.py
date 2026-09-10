@@ -10,7 +10,9 @@ class SiteProject(Base):
     ("sheet") when a visitor clicks a thumbnail in the Projects banner on
     the main page. The Projects timeline/banner itself still comes from
     `site_content` (section "projects"): a short array of
-    {id, label, image_tag}. That is the card. This table holds the expanded
+    {id, label, overview, image_tag} -- where that `overview` is the card's
+    own short point-form blurb, separate from this table's paragraph
+    `overview` below. That is the card. This table holds the expanded
     content for a card, keyed by that project's `id`, so the two can be
     edited on different schedules and a project can exist in the banner with
     no detail sheet yet (its thumbnail just is not clickable).
@@ -31,9 +33,20 @@ class SiteProject(Base):
     content     JSONB. `?` marks optional keys. Templates, not literal JSON:
 
                 {
-                  "overview":     "<string>",  ?  # prose; blank lines ->
-                                                  #   paragraphs (like every
-                                                  #   other body field)
+                  "overview":     "<string>",  ?  # the POP-UP overview -- the
+                                                  #   fuller PARAGRAPH write-up
+                                                  #   shown in the sheet. Blank
+                                                  #   lines -> paragraphs, and
+                                                  #   "- " / "* " lines -> a
+                                                  #   bullet list, via <Prose>
+                                                  #   (same as every body
+                                                  #   field). The thumbnail
+                                                  #   CARD has its own SHORT
+                                                  #   point-form overview on the
+                                                  #   `site_content` "projects"
+                                                  #   row; this one is not shown
+                                                  #   on the card unless that
+                                                  #   key is missing.
                   "features":     ["<string>", ...],  ?  # "Main features" list
                   "technologies": ["<string>", ...],  ?  # "Technologies used" list
                   "githubUrl":    "<string>",  ?  # repo link

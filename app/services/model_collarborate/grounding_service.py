@@ -126,7 +126,7 @@ class GroundingService:
         """
         self.gemini_service = gemini_service
 
-    def ground(self, user_message: str, context: dict) -> dict:
+    async def ground(self, user_message: str, context: dict) -> dict:
         """
         Asks the model which facts the reference material and conversation actually support for this message.
 
@@ -144,7 +144,7 @@ class GroundingService:
         logger.debug("User prompt: %s", user_prompt)
 
         try:
-            grounding = self.gemini_service.call_model_structured(
+            grounding = await self.gemini_service.call_model_structured(
                 model_name=DEFAULT_MODEL,
                 user_prompt=user_prompt,
                 system_prompt=system_prompt,

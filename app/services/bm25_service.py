@@ -301,10 +301,18 @@ class BM25Service:
         Parameters:
         - user_message (str): the text to match against — comes from the caller (e.g. ModelCollaborateService)
         - top_k (int): maximum number of results to return — defaults to 3
-        - min_score (float): minimum score to include a result — defaults to 0.0
+        - min_score (float): exclusive floor; a result must score STRICTLY ABOVE this to be returned — defaults to 0.0, i.e. "some term overlap or nothing"
 
         Returns:
-        - list[dict]: up to top_k matches as {question, answer, score} — goes to the caller (e.g. ContextGatherer.gather)
+        - list[dict]: up to top_k matches as {question, answer, score}, all with score > min_score — goes to the caller (e.g. ContextGatherer.gather)
+
+        The floor is exclusive, not inclusive. It used to be `score < min_score`
+        with min_score 0.0, so a document scoring exactly 0.0 -- meaning it
+        shares NO stemmed term with the message, the definition of an
+        irrelevant hit -- was still returned as a candidate. ContextGatherer
+        then spent a Gemini call asking the model to re-rank rows that could
+        not possibly match, on every turn where retrieval found nothing. An
+        empty list here skips that call entirely.
         """
         corpus = self._get_corpus()
         if corpus is None:
@@ -334,7 +342,9 @@ class BM25Service:
 
         results = []
         for doc, score in scored[:top_k]:
-            if score < min_score:
+            # Exclusive: a zero score means no shared terms at all. `scored` is
+            # sorted descending, so the first failure ends the run.
+            if score <= min_score:
                 break
             results.append({
                 "question": doc["question"],

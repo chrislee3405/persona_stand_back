@@ -43,7 +43,7 @@ class ResponseParser:
         self.gemini_service = gemini_service
         self.min_chars_per_turn = min_chars_per_turn
 
-    def parse(self, final_response: str) -> list[str]:
+    async def parse(self, final_response: str) -> list[str]:
         """
         Splits one response into an ordered list of display turns, grouped by semantic relatedness, to mimic a person sending several texts in a row rather than one long paragraph.
 
@@ -66,12 +66,20 @@ class ResponseParser:
             }
         }
 
-        response = self.gemini_service.call_model_structured(
-            model_name=DEFAULT_MODEL,
-            user_prompt=user_prompt,
-            system_prompt=system_prompt,
-            schema=schema
-        )
+        # Splitting is cosmetic -- it only decides how many bubbles the reply
+        # arrives in -- so a failure here must never cost the visitor a reply
+        # that has already passed the gate. The result check below was already
+        # defensive about the SHAPE; this covers the call itself raising.
+        try:
+            response = await self.gemini_service.call_model_structured(
+                model_name=DEFAULT_MODEL,
+                user_prompt=user_prompt,
+                system_prompt=system_prompt,
+                schema=schema
+            )
+        except Exception:
+            logger.exception("ResponseParser.parse call failed -- falling back to one turn.")
+            return [final_response]
 
         if not isinstance(response, list) or not response or not all(isinstance(turn, str) and turn.strip() for turn in response):
             logger.debug("ResponseParser.parse returned %r, expected a non-empty list of strings -- falling back to one turn.", response)

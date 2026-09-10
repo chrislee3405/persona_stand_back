@@ -177,7 +177,7 @@ class ResponseGate:
         self.gemini_service = gemini_service
         self.conversation_service = conversation_service
 
-    def _verify_response(self, recent_conversation_part: str, user_message: str, ai_response: str) -> tuple[str, list[dict]]:
+    async def _verify_response(self, recent_conversation_part: str, user_message: str, ai_response: str) -> tuple[str, list[dict]]:
         """
         Asks Gemini to audit one candidate response against the natural-response rules, collecting every rule it breaks.
 
@@ -220,12 +220,32 @@ class ResponseGate:
             "required": ["result", "violations"]
         }
 
-        check_result = self.gemini_service.call_model_structured(
-            model_name=DEFAULT_MODEL,
-            user_prompt=user_prompt,
-            system_prompt=_VERIFY_NATURAL_RESPONSE_SYSTEM_PROMPT_TEMPLATE,
-            schema=schema
-        )
+        # The auditor's own failure must not fail the turn. call_model_structured
+        # returns whatever json.loads() produced, so a degraded structured-output
+        # call can hand back null, a list or a bare string -- and `.get` on any of
+        # those raises AttributeError, which propagates all the way to
+        # ChatService's catch-all and costs the visitor their reply. Same shape as
+        # GroundingService.ground's guard, but the safe direction is the opposite
+        # one: with no usable audit there is no EVIDENCE the response is at fault,
+        # so it passes through, exactly as an audit returning only ungrounded
+        # violations already does below.
+        try:
+            check_result = await self.gemini_service.call_model_structured(
+                model_name=DEFAULT_MODEL,
+                user_prompt=user_prompt,
+                system_prompt=_VERIFY_NATURAL_RESPONSE_SYSTEM_PROMPT_TEMPLATE,
+                schema=schema
+            )
+        except Exception:
+            logger.exception("ResponseGate verification call failed -- passing the response through unaudited.")
+            return "<pass>", []
+
+        if not isinstance(check_result, dict):
+            logger.warning(
+                "ResponseGate verification returned %r, expected an object -- passing the response through unaudited.",
+                check_result
+            )
+            return "<pass>", []
 
         result = check_result.get("result", "<pass>")
         violations = check_result.get("violations") or []
@@ -275,7 +295,7 @@ class ResponseGate:
         # exhausted-attempts fallback names the distinct ones it saw.
         reject_categories: list[str] = []
         for attempt in range(regen_counter):
-            result, violations = self._verify_response(recent_conversation_part, user_message, current_response)
+            result, violations = await self._verify_response(recent_conversation_part, user_message, current_response)
 
             if result == "<pass>":
                 return current_response
@@ -354,7 +374,7 @@ class ResponseGate:
                     "Regenerate a new response using a different approach that avoids all of these problems."
                 )
 
-            current_response = self.gemini_service.call_model(
+            current_response = await self.gemini_service.call_model(
                 model_name=DEFAULT_MODEL,
                 user_prompt=user_prompt,
                 system_prompt=regen_system_prompt

@@ -48,8 +48,20 @@ class Sender(StrEnum):
     ERROR = "error"      # a failed turn's traceback, kept for review
     REGEN = "regen"      # a response-gate attempt that was rejected
 
+    # A visitor message whose turn failed before a reply existed (see
+    # ChatService.handle_chat_turn's model_orchestration except branch).
+    #
+    # "not saved" means NOT SAVED INTO THE CONVERSATION -- the row itself is
+    # very much still in the message table, kept verbatim so the app owner
+    # can see what was being asked when the failure happened. That is the
+    # whole reason it is not deleted. What the retag removes it from is the
+    # next prompt's history: left as "user" it read back to the model as a
+    # question already put to the persona and already dealt with, when in
+    # fact nothing ever answered it.
+    NOT_SAVED_USER = "not_saved_user"
+
 
 # Senders excluded from live prompt history AND from summarization, so a
 # failed or discarded attempt never reappears as if it were a real reply.
 # Consumed by ConversationService.get_recent_messages.
-NON_PROMPT_SENDERS = (Sender.ERROR, Sender.REGEN)
+NON_PROMPT_SENDERS = (Sender.ERROR, Sender.REGEN, Sender.NOT_SAVED_USER)

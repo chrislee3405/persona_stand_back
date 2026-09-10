@@ -75,11 +75,11 @@ class ModelCollaborateService:
 
         # 2. Stage 1 -- decide what the reference material actually supports.
         #    See prompt_builder for why this is a separate call.
-        grounding = self.grounding_service.ground(user_message, context)
+        grounding = await self.grounding_service.ground(user_message, context)
 
         # 3. Stage 2 -- write the reply from the approved facts only.
         system_prompt, user_prompt = self.prompt_builder.build_reply(user_message, context, grounding)
-        ai_response = self._generate_reply(system_prompt, user_prompt)
+        ai_response = await self._generate_reply(system_prompt, user_prompt)
 
         # 4a. response consistency verification. The gate regenerates against
         #     the STAGE 2 prompts, so a rejected reply is rewritten against the
@@ -94,11 +94,11 @@ class ModelCollaborateService:
         if is_fallback_response(final_response):
             response_turns = [final_response]
         else:
-            response_turns = self.response_parser.parse(final_response)
+            response_turns = await self.response_parser.parse(final_response)
 
         return final_response, response_turns, context["doc_topic_list"], context["scenario_topic_list"]
 
-    def _generate_reply(self, system_prompt: str, user_prompt: str) -> str:
+    async def _generate_reply(self, system_prompt: str, user_prompt: str) -> str:
         """
         Stage 2: sends the finalized prompts to Gemini and returns the generated reply.
 
@@ -113,7 +113,7 @@ class ModelCollaborateService:
         logger.debug("System prompt: %s", system_prompt)
         logger.debug("User prompt: %s", user_prompt)
 
-        final_response = self.gemini_service.call_model(
+        final_response = await self.gemini_service.call_model(
             model_name=DEFAULT_MODEL,
             user_prompt=user_prompt,
             system_prompt=system_prompt

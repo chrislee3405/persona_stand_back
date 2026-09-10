@@ -143,7 +143,7 @@ class ContextGatherer:
         # row that shares words but not meaning. Pull a few candidates and
         # let the model keep the one that genuinely matches, or none.
         bm25_candidates = self.bm25_service.find_similar_questions(user_message, top_k=_EXAMPLE_CANDIDATE_COUNT)
-        similar_examples = self._select_relevant_example(bm25_candidates, recent_messages, user_message)
+        similar_examples = await self._select_relevant_example(bm25_candidates, recent_messages, user_message)
 
         doc_reference_section = self._get_doc_references(doc_topic_list)
         scenario_reference_section = self._get_scenario_references(scenario_topic_list)
@@ -210,23 +210,6 @@ class ContextGatherer:
         ).all()
         return [(row[0], row[1]) for row in rows]
 
-    def _get_doc_from_db(self, topic: str) -> str | None:
-        """
-        Fetches the stored content for one document reference topic.
-
-        Parameters:
-        - topic (str): the document topic to look up — comes from _get_doc_references
-
-        Returns:
-        - str | None: the document content, or None if not found — goes to _get_doc_references
-        """
-        row = (
-            self.db.query(DocReference.content)
-            .filter(DocReference.document_topic == topic)
-            .first()
-        )
-        return row[0] if row else None
-
     def _get_doc_references(self, topics: list[str] | None) -> str:
         """
         Builds the formatted document reference section for the prompt from a list of topics.
@@ -236,17 +219,30 @@ class ContextGatherer:
 
         Returns:
         - str: the concatenated document reference text, or a placeholder if none found — goes to gather
+
+        One query for all topics rather than one per topic (the previous
+        _get_doc_from_db helper, now gone). `topics` comes from the model's
+        selection and its ORDER is meaningful, so the rows are indexed by
+        topic and then walked in the caller's order rather than in whatever
+        order the database returns them.
         """
         if not topics:
             return _NO_DOC_REFERENCE
 
-        references = []
-        for topic in topics:
-            reference = self._get_doc_from_db(topic)
-            if reference:
-                references.append(f"{topic}:\n{reference}")
+        rows = (
+            self.db.query(DocReference.document_topic, DocReference.content)
+            .filter(DocReference.document_topic.in_(topics))
+            .all()
+        )
+        by_topic = {row[0]: row[1] for row in rows}
 
-        return "\n\n".join(references) if references else "No document reference available."
+        references = [
+            f"{topic}:\n{by_topic[topic]}"
+            for topic in topics
+            if by_topic.get(topic)
+        ]
+
+        return "\n\n".join(references) if references else _NO_DOC_REFERENCE
 
     # --- DB Helper Methods for Scenario References ---
 
@@ -266,23 +262,6 @@ class ContextGatherer:
         ).all()
         return [(row[0], row[1]) for row in rows]
 
-    def _get_scenario_from_db(self, topic: str) -> str | None:
-        """
-        Fetches the stored content for one scenario reference topic.
-
-        Parameters:
-        - topic (str): the scenario topic to look up — comes from _get_scenario_references
-
-        Returns:
-        - str | None: the scenario content, or None if not found — goes to _get_scenario_references
-        """
-        row = (
-            self.db.query(ScenarioReference.content)
-            .filter(ScenarioReference.scenario_topic == topic)
-            .first()
-        )
-        return row[0] if row else None
-
     def _get_scenario_references(self, topics: list[str] | None) -> str:
         """
         Builds the formatted scenario reference section for the prompt from a list of topics.
@@ -292,21 +271,31 @@ class ContextGatherer:
 
         Returns:
         - str: the concatenated scenario reference text, or a placeholder if none found — goes to gather
+
+        One query for all topics, ordered by the caller's list -- same
+        reasoning as _get_doc_references above.
         """
         if not topics:
             return _NO_SCENARIO_REFERENCE
 
-        references = []
-        for topic in topics:
-            reference = self._get_scenario_from_db(topic)
-            if reference:
-                references.append(f"{topic}:\n{reference}")
+        rows = (
+            self.db.query(ScenarioReference.scenario_topic, ScenarioReference.content)
+            .filter(ScenarioReference.scenario_topic.in_(topics))
+            .all()
+        )
+        by_topic = {row[0]: row[1] for row in rows}
 
-        return "\n\n".join(references) if references else "No scenario reference available."
+        references = [
+            f"{topic}:\n{by_topic[topic]}"
+            for topic in topics
+            if by_topic.get(topic)
+        ]
+
+        return "\n\n".join(references) if references else _NO_SCENARIO_REFERENCE
 
     # --- Similar-example re-rank ---
 
-    def _select_relevant_example(self, candidates: list[dict], recent_messages: list | None, user_message: str) -> list[dict]:
+    async def _select_relevant_example(self, candidates: list[dict], recent_messages: list | None, user_message: str) -> list[dict]:
         """
         Asks Gemini which BM25 candidate (if any) matches the current message in meaning, guarding against keyword-overlap false positives.
 
@@ -339,7 +328,7 @@ class ContextGatherer:
             user_message=user_message
         )
 
-        response = self.gemini_service.call_model_structured(
+        response = await self.gemini_service.call_model_structured(
             model_name=DEFAULT_MODEL,
             user_prompt=user_prompt,
             system_prompt=_SELECT_EXAMPLE_SYSTEM_PROMPT,
@@ -359,7 +348,7 @@ class ContextGatherer:
 
     # --- Topic Selection ---
 
-    def _select_relevant_topics(self, doc_topics_data: list[tuple[str, str]], scenario_topics_data: list[tuple[str, str]], history_context: str, user_message: str) -> tuple[list[str], list[str]]:
+    async def _select_relevant_topics(self, doc_topics_data: list[tuple[str, str]], scenario_topics_data: list[tuple[str, str]], history_context: str, user_message: str) -> tuple[list[str], list[str]]:
         """
         Asks Gemini, in one call, to conservatively select which document and scenario topics are relevant to the user's message.
 
@@ -395,7 +384,7 @@ class ContextGatherer:
             user_message=user_message
         )
 
-        response = self.gemini_service.call_model_structured(
+        response = await self.gemini_service.call_model_structured(
             model_name=DEFAULT_MODEL,
             user_prompt=user_prompt,
             system_prompt=_FIND_TOPIC_SYSTEM_PROMPT,
@@ -440,5 +429,5 @@ class ContextGatherer:
             history_str = prepare_history(recent_messages[-8:], None)
             history_context = f"Recent conversation history for context:\n{history_str}\n\n"
 
-        return self._select_relevant_topics(doc_topics_data, scenario_topics_data, history_context, user_message)
+        return await self._select_relevant_topics(doc_topics_data, scenario_topics_data, history_context, user_message)
 

@@ -37,22 +37,65 @@ class SiteContent(Base):
                                       #   row keeps rendering. Write "title" on
                                       #   every new row.
       "heading":   "<string>",    ?   # DEPRECATED -- former name of "title".
-      "body":      "<string>",        # bio paragraph (required)
+      "body":      "<string>",        # bio (required). Blank lines ->
+                                      #   paragraphs; lines starting "- " /
+                                      #   "* " -> a bullet list. Rendered by
+                                      #   <Prose>, like every other body field.
+      "resume": {                 ?   # secondary button beside the CTA
+        "label":   "<string>",    ?   #   button text (default "Download CV")
+        "key":     "<string>"         #   S3 OBJECT KEY of the PDF, not a URL
+      },                              #   -- omit `key` and no button renders
+      "skills": [                 ?   # skill pills under the role line
+        {
+          "group":  "<string>",       #   row label, e.g. "Frontend" (required).
+                                      #   Announced to screen readers, not drawn.
+          "colour": "<string>",   ?   #   DEPRECATED -- IGNORED. Pills used to
+                                      #   take one of five named colours per
+                                      #   group; that put up to five hues three
+                                      #   lines from the top of the page and the
+                                      #   grouping it encoded was never reliable
+                                      #   (colours repeat once there are more
+                                      #   groups than hues). Groups now simply
+                                      #   ALTERNATE between the two brand
+                                      #   colours, which shows where one group
+                                      #   ends without pretending to identify
+                                      #   it. Old rows carrying this key still
+                                      #   parse; the value does nothing. Do not
+                                      #   write it on new rows.
+          "items":  ["<string>", ...] #   the pills themselves (required)
+        }
+      ],
       "cta": {                    ?   # call-to-action button
         "label":   "<string>",        #   button text
         "href":    "<string>"         #   route, e.g. "/chatroom"
       },
-      "hero": {                   ?   # hero-image FRAMING overrides. Any
-        "fit": "cover"|"fitHeight",?  #   subset; unset fields use the frontend
-        "height":     <number>,  ?   #   defaults. Lets the About photo be
-        "heightMin":  <number>,  ?   #   re-framed from the DB with no redeploy.
-        "heightMax":  <number>,  ?   #   "fit": "cover" fills+crops the band;
-        "focusX":     <number>,  ?   #   "fitHeight" shows the whole photo on
-        "focusY":     <number>,  ?   #   the left. Meaning of each: see
-        "zoom":       <number>,  ?   #   HERO_DEFAULTS in
-        "scrimStart": <number>,  ?   #   persona_stand_front/src/pages/Home.tsx
-        "scrimEnd":   <number>,  ?
-        "textWidth":  <number>   ?
+      "hero": {                     ? # hero-image FRAMING overrides. Any
+        "fit": "cover"|"fitHeight", ? #   subset; unset fields use the frontend
+        "height":       <number>,   ? #   defaults. Lets the About photo be
+        "heightMin":    <number>,   ? #   re-framed from the DB with no redeploy.
+        "heightMax":    <number>,   ? #   "fit": "cover" fills+crops the band;
+        "focusX":       <number>,   ? #   "fitHeight" shows the whole photo on
+        "focusY":       <number>,   ? #   the left.
+        "zoom":         <number>,   ?
+        "scrimFade":    <number>,   ? #   length of the photo -> page-background
+                                      #   blend, as a % of the PHOTO's width.
+        "textWidth":    <number>,   ?
+        "mobileFocusX": <number>,   ? #   backdrop horizontal slice at <= 900px
+        "tinyFocusX":   <number>    ? #   backdrop horizontal slice at <= 480px
+                                      # Meaning of each, and the defaults:
+                                      #   HeroOverrides / HERO_DEFAULTS in
+                                      #   persona_stand_front/src/lib/knobs.ts
+                                      #   -- THE authoritative list. Keep this
+                                      #   block in step with it.
+                                      # NOTE "scrimStart" and "scrimEnd" were
+                                      #   documented here long after the
+                                      #   frontend stopped reading them. They
+                                      #   are IGNORED: the scrim's position is
+                                      #   now derived from where the photo
+                                      #   actually ends, and only "scrimFade"
+                                      #   (how long the blend is) is
+                                      #   configurable. Old rows carrying them
+                                      #   still parse; the values do nothing.
       },
       "qualHero": { ...same keys as "hero"... }, ?
                                       # framing for the Qualifications & Awards
@@ -66,15 +109,19 @@ class SiteContent(Base):
                                       #   Only shows when a site_image
                                       #   ("certifications", "banner") row exists.
       # NO image key here. Every image on the site -- the hero included --
-      # is a site_image row. The hero is section="personal_statement",
-      # description="hero" (app/models/site_image.py). A leftover "heroImage"
+      # is a site_image row. The hero is section="personal_statement" with
+      # TWO slots: description="hero_desk" (framed for the side-by-side
+      # layout, >=900px) and "hero_mob" (the stacked one, <900px). The
+      # browser fetches only the one its width matches. Either may be
+      # omitted and the other stands in. (An earlier single "hero" slot is
+      # no longer read.) A leftover "heroImage"
       # key on an old row is IGNORED by the frontend; migrate it with the
       # one-liner in persona_stand_ec2yml/Part_D.md ("Migrating an existing
       # environment").
     }
 
     ------------------------------------------------------------------
-    section = "qualifications"          JSON ARRAY      Home -> Qualifications & Awards
+    section = "qualifications"          JSON ARRAY      Home -> About (Education)
     ------------------------------------------------------------------
     [
       {
@@ -84,14 +131,22 @@ class SiteContent(Base):
         "year":        "<string>", ?   # e.g. "2024" or "2024 - 2026"
         "detail":      "<string>"  ?   # one extra line (or null)
       }
-      # ... more items; array order = display order. Degrees and awards
-      # share this list -- put degrees first, then awards.
+      # ... more items; array order = display order.
     ]
+    # NOW EDUCATION ONLY. This section used to be its own full-bleed band
+    # titled "Qualifications & Awards"; it renders inside About as a short
+    # "Education" list, so a degree sits beside who you are instead of in a
+    # band of its own. Awards and prizes moved to "certifications", which is
+    # titled "Certification & Award" on the page -- put anything that is not
+    # a degree there. /qualifications and /#qualifications now redirect to
+    # that section (see RETIRED_SECTIONS in the frontend's lib/knobs.ts).
+    #
     # A bare {"body": "<string>"} object is also accepted here for a
-    # single free-text paragraph instead of a list.
+    # single free-text paragraph instead of a list -- it renders in the
+    # "Certification & Award" section, above that list.
 
     ------------------------------------------------------------------
-    section = "certifications"          JSON ARRAY      Home -> Certifications
+    section = "certifications"          JSON ARRAY      Home -> Certification & Award
     ------------------------------------------------------------------
     [
       {
@@ -113,6 +168,17 @@ class SiteContent(Base):
                                        #   site_project.project_id that holds
                                        #   this project's pop-up detail.
         "label":     "<string>",       # caption + <img alt> + sheet heading (required)
+        "overview":  "<string>",   ?   # the CARD's overview -- the short blurb
+                                       #   revealed on hover. Meant as POINT
+                                       #   FORM: write each line as "- ..."
+                                       #   (rendered by <Prose>, same "- " /
+                                       #   "* " -> bullets rule as every body
+                                       #   field). This is DISTINCT from the
+                                       #   pop-up's overview, which is a fuller
+                                       #   PARAGRAPH write-up on the
+                                       #   `site_project` row keyed by `id`.
+                                       #   Omit it and the card falls back to
+                                       #   that paragraph overview.
         "image_tag": "<string>"    ?   # names a site_image row -- section
                                        #   "projects", description == this value
                                        #   (defaults to `id`). The thumbnail URL
@@ -125,17 +191,31 @@ class SiteContent(Base):
     # This is the card. Clicking a thumbnail opens a bottom pop-up whose
     # content lives in the separate `site_project` table
     # (app/models/site_project.py), keyed by this `id`. A project with no
-    # site_project row just has a non-clickable thumbnail.
+    # site_project row just has a non-clickable thumbnail. The card and the
+    # pop-up each have their OWN overview -- a point-form summary here, a
+    # paragraph write-up there.
 
     ------------------------------------------------------------------
     section = "journey"                 JSON ARRAY      Home -> Journey
     ------------------------------------------------------------------
     [
       {
-        "id":        "<string>",       # stable key + scroll anchor (required)
+        "id":        "<string>",       # stable key + scroll anchor (required).
+                                       #   MUST be unique within the array: it
+                                       #   is the React key AND the element's
+                                       #   DOM id, so a duplicate silently
+                                       #   breaks the /#<id> anchor link.
         "year":      "<string>",       # timeline label, e.g. "2018" (required)
         "title":     "<string>",       # block heading (required)
-        "body":      "<string>",       # block paragraph (required)
+        "institution": "<string>", ?   # school / company / organisation, shown
+                                       #   in italics under the title.
+        "body":      "<string>",       # block text (required). MUST be a
+                                       #   JSON string -- a number or null here
+                                       #   raises in the frontend's renderer.
+                                       #   Blank lines -> paragraphs; lines
+                                       #   starting "- " / "* " -> a bullet
+                                       #   list ("point form"). Same renderer
+                                       #   (<Prose>) as every other body field.
         "image_tag": "<string>"    ?   # names a site_image row -- section
                                        #   "journey", description == this value.
                                        #   That row's image_path shows on the
@@ -143,6 +223,12 @@ class SiteContent(Base):
                                        #   leave a "<...>" placeholder, for no
                                        #   image. NOT an S3 key itself -- the key
                                        #   lives in site_image.image_path.
+        "image_description": "<string>", ?
+                                       # ALT TEXT for that photo: what it shows,
+                                       #   not what it is called ("Graduating
+                                       #   from QUT", not "qut_img"). Omit and
+                                       #   the image is marked decorative and
+                                       #   skipped by screen readers.
       }
       # ... more blocks; array order = top-to-bottom order
     ]
@@ -164,6 +250,39 @@ class SiteContent(Base):
           "href":  "<string>" }        #   label contains "linkedin" or
       ]                                #   "github" also gets its icon.
     }
+
+    ------------------------------------------------------------------
+    section = "navbar"                  JSON OBJECT     Site header
+    ------------------------------------------------------------------
+    {
+      "name": "<string>"          ?   # shown beside the brand mark in the
+                                      #   navigation bar. Falls back to
+                                      #   personal_statement."owner", so this
+                                      #   row is only needed to show something
+                                      #   different there.
+    }
+    # The mark itself is NOT in this row: it is a fixed CDN object
+    # (tools_icon/tab_logo.png), the same file index.html points the
+    # favicon at, so the tab icon and the header icon cannot drift apart.
+    # Replace the icon by overwriting that S3 key -- no redeploy.
+
+    ------------------------------------------------------------------
+    section = "footer"                  JSON OBJECT     Site footer
+    ------------------------------------------------------------------
+    {
+      "owner": "<string>",        ?   # name in the copyright line. Falls back
+                                      #   to personal_statement."owner".
+      "note":  "<string>",        ?   # one short line beside it, e.g.
+                                      #   "Built with React, FastAPI and AWS".
+      "links": [                  ?   # links on the right. Falls back to
+        { "label": "<string>",         #   contact."links", so social links do
+          "href":  "<string>" }        #   not have to be written twice.
+      ]
+    }
+    # The YEAR is never stored -- it is computed at render time. The footer
+    # previously carried a hardcoded "2025 Company, Inc" that went stale.
+    # Every field here is optional: with no row at all the footer still
+    # renders a correct copyright line from the owner's name.
 
     ------------------------------------------------------------------
     section = "chatroom"                JSON OBJECT     Chatroom header

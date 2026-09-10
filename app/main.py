@@ -13,6 +13,7 @@ from app.services.conversation_manage_service import (
 )
 from app.services.privacy_gate_service import PrivacyViolationError
 from app.services.rate_control_service import (
+    DailyQuotaExceededError,
     TooManyPendingMessagesError,
     TooManyPendingMessagesFromIpError,
 )
@@ -84,6 +85,16 @@ _ERROR_STATUS_DETAIL: list[tuple[type[Exception] | tuple[type[Exception], ...], 
         429,
         "You're sending messages faster than they can be answered. "
         "Please wait for a reply before sending another.",
+    ),
+    (
+        # Also 429, but a different fact about the world: the first one means
+        # "slow down", this one means "come back tomorrow". Sharing the pacing
+        # message here would tell someone who has used their allowance to wait
+        # for a reply that is never going to be allowed.
+        DailyQuotaExceededError,
+        429,
+        "You've reached the daily message limit for this chat. "
+        "Please try again tomorrow, or get in touch by email instead.",
     ),
     (
         ConsentRequiredError,
