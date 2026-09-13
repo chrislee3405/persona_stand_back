@@ -1,7 +1,7 @@
 import logging
 
 from fastapi import Depends
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.constants import DEFAULT_MODEL
 from app.database import get_db
@@ -37,12 +37,12 @@ _MIN_CHARS_PER_TURN = 40
 
 
 class ModelCollaborateService:
-    def __init__(self, db: Session = Depends(get_db), gemini_service: GeminiService = Depends(), bm25_service: BM25Service = Depends(), conversation_service: ConversationService = Depends()):
+    def __init__(self, db: AsyncSession = Depends(get_db), gemini_service: GeminiService = Depends(), bm25_service: BM25Service = Depends(), conversation_service: ConversationService = Depends()):
         """
         Stores the injected Gemini service (needed directly for _generate_ai_response) and composes the orchestration sub-services from the same injected dependencies.
 
         Parameters:
-        - db (Session): SQLAlchemy session — injected by FastAPI via get_db
+        - db (AsyncSession): SQLAlchemy async session — injected by FastAPI via get_db
         - gemini_service (GeminiService): calls the Gemini model — injected by FastAPI
         - bm25_service (BM25Service): retrieves similar past questions — injected by FastAPI
         - conversation_service (ConversationService): reads/writes conversation state — injected by FastAPI

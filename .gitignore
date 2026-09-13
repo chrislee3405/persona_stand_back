@@ -33,3 +33,14 @@ adc.json
 # 9. Local test harnesses (may reference personal reference data)
 ablation_test.py
 naturalness_test.py
+
+# 10. Real site content and personal reference data -- NEVER COMMIT.
+# This repository is PUBLIC. These files hold the owner's real CV, academic
+# transcript, residency status, contact details and persona profile.
+# audit/ is where scripts/export_content.py writes production table dumps.
+audit/
+# The seed files carrying that data stay on disk for local seeding (the
+# loader skips any file that is absent, so a fresh clone still works).
+# Only the file with no personal content are committed.
+app/models/seed/*.json
+!app/models/seed/consent_policy.json

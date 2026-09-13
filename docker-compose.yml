@@ -1,21 +1,85 @@
+# LOCAL DEVELOPMENT ONLY. Production is persona_stand_ec2yml/docker-compose.ec2.yml.
+#
+# This stack is self-contained: it runs its own Postgres, so `docker compose up`
+# works from a fresh clone with nothing but a .env file. It used to have no `db`
+# service at all -- DATABASE_URL pointed through `host.docker.internal` at an SSH
+# tunnel to the production RDS instance, which meant every local run wrote to
+# production and there was nowhere safe to run a test.
 services:
+  db:
+    image: postgres:16-alpine
+    container_name: persona_db
+    environment:
+      POSTGRES_USER: persona
+      POSTGRES_PASSWORD: persona_dev_password
+      POSTGRES_DB: persona
+    ports:
+      # HOST 5434, container 5432. Published only so pgAdmin (or psql) on the
+      # host can reach it; the backend goes over the compose network as
+      # `db:5432` and never touches this mapping, so DATABASE_URL does not
+      # mention 5434.
+      #
+      # Not 5432, because Windows will happily let TWO processes listen on it
+      # -- a natively installed postgres.exe and Docker's port proxy -- and
+      # then hand an incoming connection to whichever wins. The symptom is
+      # nasty to read: `FATAL: password authentication failed for user
+      # "persona"`, because the connection reached the OTHER server, which has
+      # no such role. Nothing in the error mentions that there are two.
+      # Not 5433 either: that is the SSH tunnel to production RDS.
+      # 127.0.0.1 only. The password above is in a public repository, so
+      # publishing on every interface would let anyone on the same network
+      # (office wifi, a café) log into this database with it.
+      - "127.0.0.1:5434:5432"
+    volumes:
+      - persona_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U persona -d persona"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - persona_network
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
   backend:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: persona_backend
+    # --reload belongs HERE, not in the Dockerfile: this is the only file that
+    # bind-mounts the source, so this is the only place a file watcher has
+    # anything to watch.
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
     ports:
       - "8000:8000"
     environment:
       - PYTHONUNBUFFERED=1
     env_file:
-      - .env                    
-    extra_hosts:                
-      - "host.docker.internal:host-gateway"
+      - .env
+    depends_on:
+      db:
+        # Not the short `- db` form. That is satisfied the moment the container
+        # is CREATED, not when Postgres is accepting connections -- so the
+        # backend's startup schema check raced it and lost on a cold start.
+        condition: service_healthy
     volumes:
       - .:/app
       - /app/__pycache__
-      - "C:/Users/user/AppData/Roaming/gcloud/application_default_credentials.json:/app/adc.json:ro"
+      # Local GCP application-default credentials, mounted read-only.
+      # Production uses Workload Identity Federation instead (no key file at
+      # all) -- see persona_stand_ec2yml/docker-compose.ec2.yml.
+      #
+      # Set GOOGLE_ADC_PATH in .env to your own path; the default below is the
+      # Linux/macOS location. On Windows it is
+      #   C:/Users/<you>/AppData/Roaming/gcloud/application_default_credentials.json
+      # This was hardcoded to one developer's Windows path, which silently
+      # mounted an empty DIRECTORY for everyone else -- Docker creates the path
+      # when it is missing -- surfacing as a confusing Google auth error rather
+      # than "file not found".
+      - "${GOOGLE_ADC_PATH:-~/.config/gcloud/application_default_credentials.json}:/app/adc.json:ro"
     develop:
       watch:
         - action: sync
@@ -26,10 +90,15 @@ services:
             - __pycache__
             - .pytest_cache
         - action: rebuild
-          path: .requirements.txt
+          # Was `.requirements.txt` -- a leading dot, so this trigger had never
+          # fired and adding a dependency silently did not install it.
+          path: requirements.txt
     networks:
       - persona_network
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
 
   frontend:
     build:
@@ -37,13 +106,22 @@ services:
       dockerfile: Dockerfile
     container_name: persona_frontend
     ports:
-      - "80:80"
+      # Host 80 -> container 8080. The image runs nginx as the non-root
+      # `nginx` user, which cannot bind port 80 inside the container.
+      # Nothing changes for a visitor: the site is still on :80.
+      - "80:8080"
     depends_on:
       - backend
     networks:
       - persona_network
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
 
 networks:
   persona_network:
     driver: bridge
+
+volumes:
+  persona_pgdata:

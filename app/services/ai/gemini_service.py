@@ -49,6 +49,69 @@ _client = genai.Client(
 JSONValue = Union[dict, list, str, int, float, bool, None]
 
 
+class GeminiEmptyResponseError(Exception):
+    """
+    Raised when a Gemini call comes back with no usable text.
+
+    `response.text` is None whenever the candidate carries no text part --
+    a safety-filter block, a recitation stop, or finish_reason=MAX_TOKENS
+    with nothing emitted (reachable here: _MAX_OUTPUT_TOKENS caps every
+    call at 2048, and ResponseGate's violation list is the longest
+    structured payload any caller asks for).
+
+    Both methods below are annotated `-> str` / `-> JSONValue`, and both
+    used to return that None straight to the caller, where it travelled
+    several frames before failing somewhere unrelated: `json.loads(None)`
+    raised TypeError; a None reply reached ResponseGate.check and died on
+    `v["quote"] in current_response` with "argument of type 'NoneType' is
+    not iterable"; `is_fallback_response(None)` died on .startswith. Every
+    one of those surfaced to the visitor as the generic "something went
+    wrong", for what is an ordinary event for a chatbot.
+
+    Raising a named error at the boundary instead means the callers that
+    ALREADY degrade gracefully -- GroundingService's GROUND_FALLBACK,
+    ResponseParser's single-turn fallback, ResponseGate passing the
+    response through unaudited -- catch it with the except clauses they
+    already have, and only the callers that genuinely cannot continue fail
+    the turn.
+    """
+
+    def __init__(self, model_name: str, finish_reason: object = None):
+        self.model_name = model_name
+        self.finish_reason = finish_reason
+        super().__init__(
+            f"{model_name} returned no text (finish_reason={finish_reason!r})"
+        )
+
+
+def _require_text(response, model_name: str) -> str:
+    """
+    Pulls the text out of a Gemini response, raising rather than returning None when there is none.
+
+    Parameters:
+    - response: the SDK's GenerateContentResponse -- comes from either call below
+    - model_name (str): which model produced it -- comes from the caller, for the error message
+
+    Returns:
+    - str: the generated text -- goes back to the calling method
+
+    Raises:
+    - GeminiEmptyResponseError: the response carries no text part. The
+      candidate's finish_reason is attached where the SDK exposes one, since
+      that is what distinguishes a safety block from a truncation and is the
+      first thing anyone reading the log will want.
+    """
+    text = response.text
+    if text:
+        return text
+
+    finish_reason = None
+    candidates = getattr(response, "candidates", None)
+    if candidates:
+        finish_reason = getattr(candidates[0], "finish_reason", None)
+    raise GeminiEmptyResponseError(model_name, finish_reason)
+
+
 class GeminiService:
     """
     Owns raw calls to Gemini via Vertex AI. Knows nothing about
@@ -76,6 +139,9 @@ class GeminiService:
 
         Returns:
         - str: the model's generated text — goes back to the calling service. Awaited, not blocking: see the class docstring.
+
+        Raises:
+        - GeminiEmptyResponseError: the model returned no text at all (safety block, truncation). Never returns None despite the SDK being able to.
         """
         response = await _client.aio.models.generate_content(
             model=model_name,
@@ -85,7 +151,7 @@ class GeminiService:
                 max_output_tokens=_MAX_OUTPUT_TOKENS,
             )
         )
-        return response.text
+        return _require_text(response, model_name)
 
     async def call_model_structured(self, model_name: str, user_prompt: str, system_prompt: str, schema: dict) -> JSONValue:
         """
@@ -99,6 +165,10 @@ class GeminiService:
 
         Returns:
         - JSONValue: the parsed JSON response, shaped by `schema` — goes back to the calling service. Awaited, not blocking: see the class docstring.
+
+        Raises:
+        - GeminiEmptyResponseError: the model returned no text at all, so there is nothing to parse.
+        - json.JSONDecodeError: the model returned text that is not valid JSON (a truncated payload does this). Callers that can degrade already catch broadly; see GroundingService.ground.
         """
         response = await _client.aio.models.generate_content(
             model=model_name,
@@ -110,4 +180,4 @@ class GeminiService:
                 max_output_tokens=_MAX_OUTPUT_TOKENS,
             )
         )
-        return json.loads(response.text)
+        return json.loads(_require_text(response, model_name))

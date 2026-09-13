@@ -1,5 +1,7 @@
 from fastapi import Depends
-from sqlalchemy.orm import Session
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.database import get_db
 from app.models import code as code_models
 from app.services.conversation_manage_service import ConversationService
@@ -11,12 +13,12 @@ class InvalidCodeError(Exception):
 
 
 class CodeService:
-    def __init__(self, db: Session = Depends(get_db), conversation_service: ConversationService = Depends()):
+    def __init__(self, db: AsyncSession = Depends(get_db), conversation_service: ConversationService = Depends()):
         """
         Stores the injected database session and ConversationService.
 
         Parameters:
-        - db (Session): SQLAlchemy session — injected by FastAPI via get_db
+        - db (AsyncSession): SQLAlchemy async session — injected by FastAPI via get_db
         - conversation_service (ConversationService): handles conversation lookups/updates — injected by FastAPI
 
         Returns:
@@ -37,6 +39,10 @@ class CodeService:
         Returns:
         - str: the matched code — goes back to codes_router.verify_code, then to the client and into the session cookie
 
+        Does NOT commit. codes_router wraps this call, the session-id rotation
+        and the ownership transfer in one transaction, so the conversation is
+        only linked to the code if the whole rotation succeeds.
+
         Raises:
         - InvalidCodeError: input_code doesn't match any stored code
         - ConversationAccessDeniedError: caller's session doesn't own conversation_id (propagated from ConversationService)
@@ -45,16 +51,15 @@ class CodeService:
         if not input_code.strip():
             raise InvalidCodeError(input_code)
 
-        result = (
-            self.db.query(code_models.InviteCode)
-            .filter(code_models.InviteCode.code == input_code)
-            .first()
+        result = await self.db.execute(
+            select(code_models.InviteCode).where(code_models.InviteCode.code == input_code)
         )
+        matched = result.scalar_one_or_none()
 
-        if result is None:
+        if matched is None:
             raise InvalidCodeError(input_code)
 
-        processed_result = result.code
+        processed_result = matched.code
 
         if conversation_id:
             await self.conversation_service.update_conversation_code(

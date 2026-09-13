@@ -12,11 +12,23 @@ class CorpusCache(Base):
     recomputing it from every question_bank row on first use.
 
     The app owner deletes this row after updating question_bank to force
-    recomputation on the next request -- see BM25Service._get_corpus. Rows
-    are never updated in place, only inserted/deleted, so no uniqueness is
-    enforced: a rare concurrent-first-request race could momentarily leave
-    two rows, but reads always take the first one and a DELETE removes all
-    of them regardless, so a stray duplicate is harmless.
+    recomputation on the next request:
+
+        DELETE FROM corpus_cache;
+
+    That genuinely takes effect now. BM25Service._get_corpus reads the
+    NEWEST row's id on every turn and compares it against the id its
+    in-process copy was built from, so a deleted row (rebuild) and a
+    replaced row (another worker recomputed) are both noticed. It used to
+    consult the process-wide cache FIRST and never re-check, which made this
+    DELETE a silent no-op until the container restarted -- new question_bank
+    rows were never retrieved and nothing said so.
+
+    Rows are never updated in place, only inserted/deleted, so no uniqueness
+    is enforced: a rare concurrent-first-request race could momentarily leave
+    two rows. Reads take the HIGHEST id (not an unordered `first()`, which
+    after a DELETE/INSERT cycle is not necessarily the newest), and a DELETE
+    removes all of them regardless, so a stray duplicate is harmless.
     """
     __tablename__ = "corpus_cache"
 

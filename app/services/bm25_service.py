@@ -4,7 +4,8 @@ import string
 import logging
 
 from fastapi import Depends
-from sqlalchemy.orm import Session
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 from stemming.porter2 import stem
 
 from app.database import get_db
@@ -195,17 +196,25 @@ class BM25Service:
 
     # Class-level, not instance-level: FastAPI constructs a fresh BM25Service
     # per request, so an instance attribute would never survive between
-    # requests. This dict persists for the lifetime of the running process,
-    # shared across every request handled by it. None means "not loaded into
-    # this process yet" -- distinct from an empty-but-loaded corpus.
+    # requests. This persists for the lifetime of the running process, shared
+    # across every request handled by it. None means "not loaded into this
+    # process yet" -- distinct from an empty-but-loaded corpus.
     _corpus_cache: dict | None = None
+    # The corpus_cache.id the in-process copy above was built from, so a
+    # cleared or replaced row is noticed. Without it the class attribute was
+    # consulted first and never re-checked, which made the documented
+    # invalidation procedure -- "delete the corpus_cache row after updating
+    # question_bank" (see app/models/corpus_cache.py) -- a silent no-op until
+    # the container restarted: new question_bank rows were never retrieved and
+    # nothing said so. -1 means "nothing cached yet".
+    _corpus_cache_id: int = -1
 
-    def __init__(self, db: Session = Depends(get_db)):
+    def __init__(self, db: AsyncSession = Depends(get_db)):
         """
         Stores the injected database session and default stop-word set.
 
         Parameters:
-        - db (Session): SQLAlchemy session — injected by FastAPI via get_db
+        - db (AsyncSession): SQLAlchemy async session — injected by FastAPI via get_db
 
         Returns:
         - None: sets self.db and self.stop_words
@@ -213,7 +222,7 @@ class BM25Service:
         self.db = db
         self.stop_words = _DEFAULT_STOP_WORDS
 
-    def _load_all(self) -> list[question_bank_models.QuestionBank]:
+    async def _load_all(self) -> list[question_bank_models.QuestionBank]:
         """
         Fetches every row from the question_bank table.
 
@@ -223,9 +232,10 @@ class BM25Service:
         Returns:
         - list[QuestionBank]: all question_bank rows — goes to _compute_corpus
         """
-        return self.db.query(question_bank_models.QuestionBank).all()
+        result = await self.db.execute(select(question_bank_models.QuestionBank))
+        return list(result.scalars().all())
 
-    def _compute_corpus(self) -> dict | None:
+    async def _compute_corpus(self) -> dict | None:
         """
         Computes the BM25 corpus (per-question term frequencies/size, plus corpus-wide stats) from every question_bank row.
 
@@ -235,7 +245,7 @@ class BM25Service:
         Returns:
         - dict | None: {"documents": [{"question", "answer", "term_freqs", "size"}, ...], "avg_doc_length", "idf_dict"}, or None if question_bank is empty — goes to _get_corpus, which caches it in memory and persists it to corpus_cache
         """
-        rows = self._load_all()
+        rows = await self._load_all()
         if not rows:
             return None
 
@@ -265,36 +275,88 @@ class BM25Service:
             "idf_dict": idf_dict
         }
 
-    def _get_corpus(self) -> dict | None:
+    async def _get_corpus(self) -> dict | None:
         """
-        Returns the BM25 corpus, preferring the in-memory cache, then the corpus_cache table, then computing it fresh from question_bank as a last resort.
+        Returns the BM25 corpus, reusing the in-process copy when the corpus_cache row it was built from is still the current one, and otherwise loading or recomputing it.
 
         Parameters:
         - none
 
         Returns:
         - dict | None: the corpus (see _compute_corpus for shape), or None if question_bank is empty — goes to find_similar_questions
+
+        THE POINT OF THE ID CHECK. The in-process copy used to be consulted
+        first and never re-checked, so once any request in this process had
+        populated it, deleting the corpus_cache row -- the invalidation
+        procedure app/models/corpus_cache.py documents -- did nothing until
+        the container restarted. New question_bank rows were silently never
+        retrieved, so `similar_examples` stayed empty, so the persona answered
+        without the stored example it should have had. No error, no log line,
+        nothing to notice from the outside.
+
+        One indexed `SELECT id ... LIMIT 1` per turn buys the fix. That is
+        nothing beside the 6-11 Gemini calls the same turn makes, and it
+        catches BOTH ways the corpus can change: the row being deleted (the
+        owner forcing a rebuild) and the row being replaced (a newer corpus
+        computed by another worker).
+
+        The three outcomes:
+        - no row at all      -> the owner cleared it: recompute from
+                                question_bank, persist, and adopt the new row.
+        - a different row id -> somebody else recomputed it: load theirs.
+        - the same row id    -> the in-process copy is current: use it.
         """
-        if BM25Service._corpus_cache is not None:
+        result = await self.db.execute(
+            select(CorpusCache.id).order_by(CorpusCache.id.desc()).limit(1)
+        )
+        current_id = result.scalar_one_or_none()
+
+        if current_id is None:
+            # Cleared (or never built). Drop whatever this process was holding
+            # BEFORE recomputing, so a failure here cannot leave a stale copy
+            # looking current.
+            BM25Service._corpus_cache = None
+            BM25Service._corpus_cache_id = -1
+
+            corpus = await self._compute_corpus()
+            if corpus is None:
+                # question_bank is empty -- nothing to cache, and nothing to
+                # persist either. Retried on the next turn, which is correct:
+                # the owner may still be loading rows.
+                return None
+
+            row = CorpusCache(data=corpus)
+            self.db.add(row)
+            await self.db.commit()
+            await self.db.refresh(row)
+            BM25Service._corpus_cache = corpus
+            BM25Service._corpus_cache_id = row.id
+            logger.info(
+                "Recomputed the BM25 corpus from question_bank (%d documents) and persisted it as corpus_cache id=%d.",
+                len(corpus["documents"]), row.id,
+            )
+            return corpus
+
+        if BM25Service._corpus_cache is not None and BM25Service._corpus_cache_id == current_id:
             return BM25Service._corpus_cache
 
-        row = self.db.query(CorpusCache).first()
-        if row is not None:
-            logger.debug("Loaded BM25 corpus from corpus_cache table.")
-            BM25Service._corpus_cache = row.data
+        result = await self.db.execute(
+            select(CorpusCache).where(CorpusCache.id == current_id)
+        )
+        row = result.scalar_one_or_none()
+        if row is None:
+            # Deleted between the two statements above -- the owner clearing
+            # it at exactly this moment. Treat it as "not cached" and let the
+            # next turn recompute; refusing to guess is cheaper than a
+            # half-second race window is worth.
             return BM25Service._corpus_cache
 
-        corpus = self._compute_corpus()
-        if corpus is None:
-            return None
+        BM25Service._corpus_cache = row.data
+        BM25Service._corpus_cache_id = row.id
+        logger.debug("Loaded BM25 corpus from corpus_cache id=%d.", row.id)
+        return BM25Service._corpus_cache
 
-        BM25Service._corpus_cache = corpus
-        self.db.add(CorpusCache(data=corpus))
-        self.db.commit()
-        logger.debug("Computed BM25 corpus from question_bank and persisted it to corpus_cache.")
-        return corpus
-
-    def find_similar_questions(self, user_message: str, top_k: int = 3, min_score: float = 0.0) -> list[dict]:
+    async def find_similar_questions(self, user_message: str, top_k: int = 3, min_score: float = 0.0) -> list[dict]:
         """
         Ranks question_bank rows by BM25 score against a user message and returns the top matches.
 
@@ -314,7 +376,7 @@ class BM25Service:
         not possibly match, on every turn where retrieval found nothing. An
         empty list here skips that call entirely.
         """
-        corpus = self._get_corpus()
+        corpus = await self._get_corpus()
         if corpus is None:
             return []
 

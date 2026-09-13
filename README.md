@@ -1,3 +1,172 @@
-# Please find the main setup tutorial in https://github.com/chrislee3405/persona_stand_ec2yml
+# persona_stand_back
 
-# current version 0.6.2
+FastAPI + SQLAlchemy (async) + PostgreSQL. The chat pipeline and the
+site-content API.
+
+Full setup tutorial: https://github.com/chrislee3405/persona_stand_ec2yml
+
+Current version 0.6.3
+
+---
+
+## Local development
+
+The stack is self-contained — it runs its own Postgres. Nothing tunnels to
+production any more.
+
+### 1. Create `.env`
+
+Copy the block below into `persona_stand_back/.env`.
+
+```env
+# --- Database ------------------------------------------------------------
+# The host is the compose SERVICE NAME, not localhost: the backend reaches
+# Postgres over the compose network. pgAdmin on your host uses localhost.
+DATABASE_URL=postgresql://persona:persona_dev_password@db:5432/persona
+
+# --- Session signing -----------------------------------------------------
+# Signs the httpOnly session cookie, which carries consent and invite-code
+# verification. Generate a real one:
+#   python -c "import secrets; print(secrets.token_urlsafe(48))"
+# Changing it logs every visitor out.
+SESSION_SECRET_KEY=change-me-generate-a-real-one
+
+# --- Google Cloud / Vertex AI --------------------------------------------
+GCP_PROJECT_ID=<your-gcp-project-id>
+
+# Where your own application-default credentials live. Create them with
+#   gcloud auth application-default login
+# Linux/macOS: ~/.config/gcloud/application_default_credentials.json
+# Windows:     C:/Users/<you>/AppData/Roaming/gcloud/application_default_credentials.json
+# Deployment uses Workload Identity Federation instead and needs no key file.
+GOOGLE_ADC_PATH=~/.config/gcloud/application_default_credentials.json
+
+# --- Environment ---------------------------------------------------------
+# Leave unset locally. See the warning under "ENV" below before setting it
+# anywhere that is deployed.
+# ENV=production
+```
+
+`DATABASE_URL` is written in the plain `postgresql://` form and rewritten to
+`postgresql+asyncpg://` at startup (`app/database.py`), so the same string
+works unchanged in psql and pgAdmin. An `?sslmode=require` is understood and
+translated for asyncpg.
+
+**`ENV`**: setting it to `production` raises the log level to INFO *and* marks
+the session cookie `Secure`. A `Secure` cookie is never sent over plain
+`http://`, so setting this on a deployment with no TLS locks every visitor out
+of chat — their session is empty on every request, consent never sticks, and
+every turn returns 403. Terminate TLS first.
+
+### 2. Bring the stack up
+
+```bash
+docker compose up --build
+```
+
+Postgres comes up first (the backend waits on its healthcheck), then the
+backend creates any missing tables on startup.
+
+### 3. Seed the database
+
+```bash
+docker compose exec backend python -m app.models.seed.load
+```
+
+The real content seed files are **gitignored** — this repository is public and
+they hold the owner's CV, transcript and contact details. A fresh clone seeds
+only the consent policy and the local dev invite code; see
+[`app/models/seed/README.md`](app/models/seed/README.md) for how to bring real
+content onto a new machine, and why `invite_code.json` must never reach a
+deployed database. To check the seed files without writing anything:
+
+```bash
+docker compose exec backend python -m app.models.seed.load --dry-run
+```
+
+The site is then at http://localhost and the API at http://localhost:8000.
+The local invite code is `LOCAL-DEV-CODE`.
+
+---
+
+## Connecting pgAdmin to the local database
+
+The `db` service publishes **host port 5434** (container 5432), so pgAdmin
+connects to your host, not to the container network.
+
+Why not 5432: Windows lets two processes listen on the same port, so a
+natively installed `postgres.exe` and Docker's port proxy can both bind 5432 —
+and an incoming connection goes to whichever wins. The symptom is misleading:
+`FATAL: password authentication failed for user "persona"`, because the
+connection reached the *other* server, which has no such role. Check with
+`netstat -ano | findstr :5432` — two LISTENING lines means you have this.
+(5433 is avoided too: that's the SSH tunnel to production RDS.)
+
+1. Make sure the stack is running: `docker compose ps` should show
+   `persona_db` as `healthy`.
+2. In pgAdmin: right-click **Servers** → **Register** → **Server…**
+3. **General** tab → **Name**: `persona local` (any label — this is just
+   pgAdmin's own name for the connection).
+4. **Connection** tab:
+
+   | Field | Value |
+   |---|---|
+   | Host name/address | `localhost` |
+   | Port | `5434` |
+   | Maintenance database | `persona` |
+   | Username | `persona` |
+   | Password | `persona_dev_password` |
+   | Save password | tick it |
+
+5. **Save**. The tables are under
+   `persona` → **Schemas** → `public` → **Tables**.
+
+Notes:
+
+- **Host is `localhost`, not `db`.** `db` is the compose service name and only
+  resolves *inside* the compose network. pgAdmin runs on your machine.
+- **If pgAdmin itself runs in Docker**, `localhost` is that container, not your
+  host — use `host.docker.internal` (Windows/macOS) as the host, or put pgAdmin
+  on the `persona_network` and use `db` as the host.
+- **The port is 5434, not 5432** — see the note above. If 5434 is also taken
+  on your machine, change the left-hand side of the mapping in
+  `docker-compose.yml` and point pgAdmin at whatever you pick. `DATABASE_URL`
+  does not change: the backend goes through the compose network as `db:5432`
+  and never touches the published port.
+- **`docker compose down` keeps your data** (it lives in the `persona_pgdata`
+  named volume). `docker compose down -v` deletes it; re-run the seed loader
+  afterwards.
+
+Useful queries once connected:
+
+```sql
+-- what the site is currently serving (newest row per section)
+SELECT DISTINCT ON (section) section, created_at
+FROM site_content ORDER BY section, created_at DESC, id DESC;
+
+-- today's rate-limit counters, busiest first
+SELECT key, count FROM rate_limit_counter
+WHERE day = CURRENT_DATE ORDER BY count DESC;
+
+-- failed turns kept for review (no tracebacks stored -- grep the log for the incident id)
+SELECT created_at, text FROM message WHERE sender = 'error' ORDER BY created_at DESC LIMIT 20;
+
+-- force a BM25 rebuild after editing question_bank
+DELETE FROM corpus_cache;
+```
+
+---
+
+## Validating content before it reaches the database
+
+The JSONB content columns have no `CHECK` constraint and the frontend casts the
+payload rather than parsing it, so a wrong type in one row throws mid-render in
+every visitor's browser. Run any hand-written content through the validator
+first:
+
+```bash
+python -m app.validators.content_validator my-content.json
+python -m app.validators.content_validator --section journey journey-only.json
+```
+
+The seed loader runs the same checks on every payload it inserts.

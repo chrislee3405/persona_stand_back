@@ -1,7 +1,8 @@
 import logging
 
 from fastapi import Depends
-from sqlalchemy.orm import Session
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.constants import DEFAULT_MODEL
 from app.database import get_db
@@ -102,12 +103,12 @@ def _format_topic_descriptions(topics_data: list[tuple[str, str]]) -> str:
 
 
 class ContextGatherer:
-    def __init__(self, db: Session = Depends(get_db), gemini_service: GeminiService = Depends(), bm25_service: BM25Service = Depends(), conversation_service: ConversationService = Depends()):
+    def __init__(self, db: AsyncSession = Depends(get_db), gemini_service: GeminiService = Depends(), bm25_service: BM25Service = Depends(), conversation_service: ConversationService = Depends()):
         """
         Stores the injected database session and service instances.
 
         Parameters:
-        - db (Session): SQLAlchemy session — injected by FastAPI via get_db, or passed explicitly by ModelCollaborateService
+        - db (AsyncSession): SQLAlchemy async session — injected by FastAPI via get_db, or passed explicitly by ModelCollaborateService
         - gemini_service (GeminiService): calls the Gemini model — injected by FastAPI, or passed explicitly
         - bm25_service (BM25Service): retrieves similar past questions — injected by FastAPI, or passed explicitly
         - conversation_service (ConversationService): reads conversation state — injected by FastAPI, or passed explicitly
@@ -131,7 +132,7 @@ class ContextGatherer:
         Returns:
         - dict: similar_examples, doc/scenario reference sections, doc/scenario topic lists, candidate_identity, core_personality, prefer_name, recent_messages, summary — goes to PromptBuilder.build and ModelCollaborateService.model_orchestration
         """
-        conversation = self.conversation_service.get_conversation_unlocked(conversation_id)
+        conversation = await self.conversation_service.get_conversation_unlocked(conversation_id)
         summary = conversation.summary if conversation else None
 
         # Fetch history first so we can use it to determine topics and to
@@ -142,12 +143,12 @@ class ContextGatherer:
         # BM25 ranks by keyword overlap, so its top hit is often a generic
         # row that shares words but not meaning. Pull a few candidates and
         # let the model keep the one that genuinely matches, or none.
-        bm25_candidates = self.bm25_service.find_similar_questions(user_message, top_k=_EXAMPLE_CANDIDATE_COUNT)
+        bm25_candidates = await self.bm25_service.find_similar_questions(user_message, top_k=_EXAMPLE_CANDIDATE_COUNT)
         similar_examples = await self._select_relevant_example(bm25_candidates, recent_messages, user_message)
 
-        doc_reference_section = self._get_doc_references(doc_topic_list)
-        scenario_reference_section = self._get_scenario_references(scenario_topic_list)
-        candidate_identity, core_personality, prefer_name = self._get_personality_profile()
+        doc_reference_section = await self._get_doc_references(doc_topic_list)
+        scenario_reference_section = await self._get_scenario_references(scenario_topic_list)
+        candidate_identity, core_personality, prefer_name = await self._get_personality_profile()
 
         context = {
             "similar_examples": similar_examples,
@@ -166,7 +167,7 @@ class ContextGatherer:
 
     # --- DB Helper Method for Personality Profile ---
 
-    def _get_personality_profile(self) -> tuple[str, str, str]:
+    async def _get_personality_profile(self) -> tuple[str, str, str]:
         """
         Fetches the single personality_reference row and builds the candidate identity block plus the core personality text.
 
@@ -176,7 +177,8 @@ class ContextGatherer:
         Returns:
         - tuple[str, str, str]: (candidate_identity, core_personality, prefer_name) built from personality_reference's single/first row (the table has no topic to select between), or fallback strings if the table is empty — goes to gather. prefer_name is returned on its own as well as inside candidate_identity because PromptBuilder has to interpolate the bare name into the decline instruction; see _grounding_section.
         """
-        row = self.db.query(PersonalityReference).first()
+        result = await self.db.execute(select(PersonalityReference).limit(1))
+        row = result.scalar_one_or_none()
         if row is None:
             logger.warning("personality_reference table is empty — using fallback identity and personality text.")
             return (
@@ -188,13 +190,13 @@ class ContextGatherer:
         candidate_identity = (
             f"Legal name: {row.legal_name}\n"
             f"Preferred name: {row.prefer_name}\n"
-            f"Cultural background: {row.cluture_background}"
+            f"Cultural background: {row.culture_background}"
         )
         return candidate_identity, row.core_personality, row.prefer_name
 
     # --- DB Helper Methods for Doc References ---
 
-    def _get_doc_topics(self) -> list[tuple[str, str]]:
+    async def _get_doc_topics(self) -> list[tuple[str, str]]:
         """
         Fetches every document reference topic and its description.
 
@@ -204,13 +206,12 @@ class ContextGatherer:
         Returns:
         - list[tuple[str, str]]: (document_topic, topic_description) pairs — goes to _find_topic
         """
-        rows = self.db.query(
-            DocReference.document_topic,
-            DocReference.topic_description
-        ).all()
-        return [(row[0], row[1]) for row in rows]
+        result = await self.db.execute(
+            select(DocReference.document_topic, DocReference.topic_description)
+        )
+        return [(row[0], row[1]) for row in result.all()]
 
-    def _get_doc_references(self, topics: list[str] | None) -> str:
+    async def _get_doc_references(self, topics: list[str] | None) -> str:
         """
         Builds the formatted document reference section for the prompt from a list of topics.
 
@@ -229,12 +230,11 @@ class ContextGatherer:
         if not topics:
             return _NO_DOC_REFERENCE
 
-        rows = (
-            self.db.query(DocReference.document_topic, DocReference.content)
-            .filter(DocReference.document_topic.in_(topics))
-            .all()
+        result = await self.db.execute(
+            select(DocReference.document_topic, DocReference.content)
+            .where(DocReference.document_topic.in_(topics))
         )
-        by_topic = {row[0]: row[1] for row in rows}
+        by_topic = {row[0]: row[1] for row in result.all()}
 
         references = [
             f"{topic}:\n{by_topic[topic]}"
@@ -246,7 +246,7 @@ class ContextGatherer:
 
     # --- DB Helper Methods for Scenario References ---
 
-    def _get_scenario_topics(self) -> list[tuple[str, str]]:
+    async def _get_scenario_topics(self) -> list[tuple[str, str]]:
         """
         Fetches every scenario reference topic and its description.
 
@@ -256,13 +256,12 @@ class ContextGatherer:
         Returns:
         - list[tuple[str, str]]: (scenario_topic, topic_description) pairs — goes to _find_topic
         """
-        rows = self.db.query(
-            ScenarioReference.scenario_topic,
-            ScenarioReference.topic_description
-        ).all()
-        return [(row[0], row[1]) for row in rows]
+        result = await self.db.execute(
+            select(ScenarioReference.scenario_topic, ScenarioReference.topic_description)
+        )
+        return [(row[0], row[1]) for row in result.all()]
 
-    def _get_scenario_references(self, topics: list[str] | None) -> str:
+    async def _get_scenario_references(self, topics: list[str] | None) -> str:
         """
         Builds the formatted scenario reference section for the prompt from a list of topics.
 
@@ -278,12 +277,11 @@ class ContextGatherer:
         if not topics:
             return _NO_SCENARIO_REFERENCE
 
-        rows = (
-            self.db.query(ScenarioReference.scenario_topic, ScenarioReference.content)
-            .filter(ScenarioReference.scenario_topic.in_(topics))
-            .all()
+        result = await self.db.execute(
+            select(ScenarioReference.scenario_topic, ScenarioReference.content)
+            .where(ScenarioReference.scenario_topic.in_(topics))
         )
-        by_topic = {row[0]: row[1] for row in rows}
+        by_topic = {row[0]: row[1] for row in result.all()}
 
         references = [
             f"{topic}:\n{by_topic[topic]}"
@@ -328,12 +326,25 @@ class ContextGatherer:
             user_message=user_message
         )
 
-        response = await self.gemini_service.call_model_structured(
-            model_name=DEFAULT_MODEL,
-            user_prompt=user_prompt,
-            system_prompt=_SELECT_EXAMPLE_SYSTEM_PROMPT,
-            schema=schema
-        )
+        # Keeping no example is a perfectly good outcome -- it is what the
+        # model is asked to choose whenever nothing genuinely matches -- so a
+        # failed or empty call must degrade to that, not cost the visitor
+        # their reply. The shape checks below were already defensive; this
+        # covers the call itself raising, including GeminiEmptyResponseError
+        # when a safety filter blocks the (entirely benign) re-rank prompt.
+        try:
+            response = await self.gemini_service.call_model_structured(
+                model_name=DEFAULT_MODEL,
+                user_prompt=user_prompt,
+                system_prompt=_SELECT_EXAMPLE_SYSTEM_PROMPT,
+                schema=schema
+            )
+        except Exception:
+            logger.warning(
+                "_select_relevant_example call failed -- continuing with no stored example.",
+                exc_info=True,
+            )
+            return []
 
         if not isinstance(response, str) or not response.isdigit():
             if response != "none":
@@ -384,12 +395,25 @@ class ContextGatherer:
             user_message=user_message
         )
 
-        response = await self.gemini_service.call_model_structured(
-            model_name=DEFAULT_MODEL,
-            user_prompt=user_prompt,
-            system_prompt=_FIND_TOPIC_SYSTEM_PROMPT,
-            schema=schema
-        )
+        # Same reasoning as _select_relevant_example: the docstring already
+        # commits to returning two empty lists rather than raising when the
+        # reply is malformed, because no references is a recoverable outcome --
+        # Stage 1 still classifies the question and Stage 2 declines rather
+        # than inventing. A call that RAISES is the same outcome and must be
+        # handled the same way.
+        try:
+            response = await self.gemini_service.call_model_structured(
+                model_name=DEFAULT_MODEL,
+                user_prompt=user_prompt,
+                system_prompt=_FIND_TOPIC_SYSTEM_PROMPT,
+                schema=schema
+            )
+        except Exception:
+            logger.warning(
+                "_select_relevant_topics call failed -- continuing with no reference topics.",
+                exc_info=True,
+            )
+            return [], []
 
         if not isinstance(response, dict):
             logger.debug("_select_relevant_topics returned %r, expected an object", response)
@@ -418,8 +442,8 @@ class ContextGatherer:
         Returns:
         - tuple[list[str], list[str]]: (matched_doc_topics, matched_scenario_topics) — goes to gather
         """
-        doc_topics_data = self._get_doc_topics()
-        scenario_topics_data = self._get_scenario_topics()
+        doc_topics_data = await self._get_doc_topics()
+        scenario_topics_data = await self._get_scenario_topics()
 
         # Up to 4 most recent message pairs (8 messages) for context, rendered
         # by the shared formatter -- the same one _select_relevant_example

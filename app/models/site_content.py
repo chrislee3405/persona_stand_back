@@ -41,10 +41,15 @@ class SiteContent(Base):
                                       #   paragraphs; lines starting "- " /
                                       #   "* " -> a bullet list. Rendered by
                                       #   <Prose>, like every other body field.
-      "resume": {                 ?   # secondary button beside the CTA
-        "label":   "<string>",    ?   #   button text (default "Download CV")
-        "key":     "<string>"         #   S3 OBJECT KEY of the PDF, not a URL
-      },                              #   -- omit `key` and no button renders
+      "resume": {                 ?   # the CV button beside the chat icon
+        "label":   "<string>"     ?   #   its accessible name and tooltip
+      },                              #   (default "Download CV"). NO key here:
+                                      #   the PDF is a site_image row --
+                                      #   section "personal_statement",
+                                      #   description "resume", image_path =
+                                      #   the PDF's S3 key. No row, no button.
+                                      #   A "key" left on an older row is
+                                      #   IGNORED.
       "skills": [                 ?   # skill pills under the role line
         {
           "group":  "<string>",       #   row label, e.g. "Frontend" (required).
@@ -167,7 +172,14 @@ class SiteContent(Base):
         "id":        "<string>",       # stable key (required). Also the
                                        #   site_project.project_id that holds
                                        #   this project's pop-up detail.
-        "label":     "<string>",       # caption + <img alt> + sheet heading (required)
+        "label":     "<string>",       # caption + sheet heading (required);
+                                       #   also the thumbnail alt when
+                                       #   image_description is absent
+        "image_description": "<string>", ?
+                                       # ALT TEXT for the thumbnail: what the
+                                       #   screenshot shows, not the project's
+                                       #   name (the label under it already
+                                       #   says that). Falls back to `label`.
         "overview":  "<string>",   ?   # the CARD's overview -- the short blurb
                                        #   revealed on hover. Meant as POINT
                                        #   FORM: write each line as "- ..."

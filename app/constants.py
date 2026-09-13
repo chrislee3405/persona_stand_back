@@ -65,3 +65,64 @@ class Sender(StrEnum):
 # failed or discarded attempt never reappears as if it were a real reply.
 # Consumed by ConversationService.get_recent_messages.
 NON_PROMPT_SENDERS = (Sender.ERROR, Sender.REGEN, Sender.NOT_SAVED_USER)
+
+
+# --- Turn deadline -------------------------------------------------------
+# Whole-turn wall clock ceiling, seconds. A turn makes 6-11 sequential Gemini
+# calls, each with its own 30s ceiling (_REQUEST_TIMEOUT_MS in
+# app/services/ai/gemini_service.py), so the per-call timeout alone bounds a
+# turn at ~330s -- far past nginx's proxy_read_timeout (120s in
+# persona_stand_front/nginx.conf).
+#
+# When nginx gives up first the visitor gets a 504 while this process happily
+# finishes the turn and COMMITS the reply. The next turn's history then holds
+# a persona message the visitor never saw, and the frontend has already told
+# them their own message was "Not sent". Both halves of the transcript are
+# wrong and neither side knows.
+#
+# This deadline makes the backend give up FIRST, so the failure is one we
+# control: ChatService treats it exactly like any other generation failure --
+# the visitor's message is retagged Sender.NOT_SAVED_USER and no Sender.BACKEND
+# row is ever written, so nothing from a timed-out turn reaches the next
+# prompt's history.
+#
+# MUST stay comfortably under nginx's proxy_read_timeout. Keep the two in step.
+TURN_DEADLINE_SECONDS = 100.0
+
+
+# --- Invite-code brute-force protection ----------------------------------
+# Global daily ceiling on FAILED invite-code verifications, summed across every
+# IP. Successful verifications never count. Once the day's total reaches this,
+# /api/code stops checking codes at all and returns 429 until the counter rolls
+# over at midnight (server local date, same rule as every other daily counter).
+#
+# Global rather than per-IP because per-IP alone is not a brute-force control:
+# an attacker with a botnet or a rotating proxy pool simply spreads the guesses.
+# A global circuit breaker bounds total guesses per day no matter how they are
+# distributed. It fails closed -- legitimate invite holders are locked out for
+# the rest of the day too -- which is the correct trade for this app: an invite
+# holder can email instead, and a guessed code is unmetered LLM spend.
+MAX_DAILY_INVITE_CODE_FAILURES = 300
+
+# Per-IP daily ceiling on failed invite-code verifications. The first layer:
+# it stops one machine burning the global allowance on its own, so the global
+# breaker above is only reached by genuinely distributed traffic.
+MAX_DAILY_INVITE_CODE_FAILURES_PER_IP = 20
+
+# Per-IP daily ceiling on POST /api/consent. That endpoint takes no credential
+# and INSERTS a consent_record row per previously-unseen session id, and a
+# caller mints a fresh session id simply by dropping its cookie -- so without
+# this it is an unauthenticated, unbounded row-insertion endpoint. Generous
+# enough that a shared NAT/office IP never trips it: a genuine visitor consents
+# once per policy version.
+MAX_DAILY_CONSENT_SUBMISSIONS_PER_IP = 50
+
+
+# --- Rate-limit counter retention ----------------------------------------
+# How many days of daily rate-limit rows to keep. They are retained rather than
+# deleted on rollover so the owner can review traffic and spot abuse after the
+# fact -- but they are one row per (key, day), and `key` includes per-session
+# and per-IP values, so without a ceiling the table grows forever.
+# Swept opportunistically on the first request of each new day; see
+# RateControlService._sweep_expired_counters.
+RATE_LIMIT_RETENTION_DAYS = 90

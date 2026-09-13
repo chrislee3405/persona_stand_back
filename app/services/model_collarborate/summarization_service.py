@@ -1,9 +1,14 @@
+import logging
+
 from fastapi import Depends
 
 from app.constants import SUMMARY_MODEL
+from app.database import SessionLocal
 from app.services.conversation_manage_service import ConversationService
 from app.services.ai.gemini_service import GeminiService
 from app.services.model_collarborate.prepare_history import prepare_history
+
+logger = logging.getLogger(__name__)
 
 RECENT_MESSAGES_BEFORE_SUMMARIZE = 10
 
@@ -35,20 +40,44 @@ _USER_PROMPT_TEMPLATE = (
 
 
 class SummarizationService:
+    """
+    Folds a conversation's recent messages into its running summary, as a
+    background task scheduled after the chat response has already been sent.
 
-    def __init__(self, conversation_service: ConversationService = Depends(), gemini_service: GeminiService = Depends()):
+    OWNS ITS SESSIONS, and opens them one short transaction at a time. Two
+    separate reasons, both of which used to be bugs:
+
+    1. It cannot use the request's session. FastAPI runs a yield-dependency's
+       exit code BEFORE the response's background tasks, so by the time this
+       runs, `get_db` has already closed the session it was handed. It
+       happened to keep working because a closed AsyncSession checks out a
+       fresh connection on next use -- which is working by accident.
+
+    2. A summarization run spans a model call that takes seconds. It used to
+       hold a `SELECT ... FOR UPDATE` on the conversation row across that whole
+       call, because its read went through get_recent_messages while that still
+       locked. The visitor's NEXT message then blocked on append_message until
+       the summary came back -- a multi-second stall on the turn after every
+       tenth message, with nothing to explain it. The read now finishes and
+       releases its transaction before Gemini is called, and only the write at
+       the end takes a lock, for as long as one UPDATE takes.
+
+    Reading the rows in one session and using them after it closes is safe
+    because SessionLocal sets expire_on_commit=False: the instances detach with
+    their loaded columns intact, and only `.sender`, `.text` and `.order_index`
+    are read afterwards.
+    """
+
+    def __init__(self, gemini_service: GeminiService = Depends()):
         """
-        Stores the injected service instances.
+        Stores the injected Gemini service.
 
         Parameters:
-        - conversation_service (ConversationService): reads/updates conversation state — injected by FastAPI
         - gemini_service (GeminiService): calls the Gemini model — injected by FastAPI
 
         Returns:
-        - None: sets self.conversation_service, self.gemini_service. No DB session is taken -- every read
-          and write goes through conversation_service, which owns its own.
+        - None: sets self.gemini_service. No database session and no ConversationService are injected: this runs after the request's session is gone, so it opens its own — see the class docstring.
         """
-        self.conversation_service = conversation_service
         self.gemini_service = gemini_service
 
     async def summarize_conversation_if_needed(self, conversation_id: str) -> None:
@@ -56,17 +85,50 @@ class SummarizationService:
         Fetches the current summary and recent messages for a conversation and checks whether it needs summarizing.
 
         Parameters:
-        - conversation_id (str): the conversation to check — comes from conversations_router, scheduled as a background task
+        - conversation_id (str): the conversation to check — comes from ChatService, scheduled as a background task
 
         Returns:
         - None: summarizes and stores an updated summary once the conversation has at least
-          RECENT_MESSAGES_BEFORE_SUMMARIZE unsummarized messages; otherwise returns without doing anything
+          RECENT_MESSAGES_BEFORE_SUMMARIZE unsummarized messages; otherwise returns without doing anything.
+
+        NEVER RAISES. Starlette awaits background tasks inside the response's
+        own __call__, after the body has already been sent, so an exception
+        here propagates up the middleware stack with the response already
+        committed -- surfacing as "Exception in ASGI application" and, on some
+        servers, an abruptly closed connection. The visitor's reply has
+        already been delivered and persisted by this point; a failed summary
+        must not disturb it. It is logged and dropped, and the next turn past
+        the threshold tries again.
         """
-        conversation = self.conversation_service.get_conversation_unlocked(conversation_id)
-        summary = conversation.summary if conversation else None
-        recent_messages = await self.conversation_service.get_recent_messages(
-            conversation_id, exclude_last=False
-        )
+        try:
+            await self._summarize_conversation_if_needed(conversation_id)
+        except Exception:
+            logger.exception(
+                "summarization failed for conversation_id=%s -- the reply was already sent and persisted, "
+                "and the checkpoint is unchanged, so the next turn past the threshold will retry.",
+                conversation_id,
+            )
+
+    async def _summarize_conversation_if_needed(self, conversation_id: str) -> None:
+        """
+        The body of summarize_conversation_if_needed, split out so the caller above can be a bare try/except.
+
+        Parameters:
+        - conversation_id (str): the conversation to check — comes from summarize_conversation_if_needed
+
+        Returns:
+        - None: see summarize_conversation_if_needed
+        """
+        # --- Read, in its own short-lived session --------------------------
+        async with SessionLocal() as read_session:
+            conversation_service = ConversationService(db=read_session)
+            conversation = await conversation_service.get_conversation_unlocked(conversation_id)
+            if conversation is None:
+                return
+            summary = conversation.summary
+            recent_messages = await conversation_service.get_recent_messages(
+                conversation_id, exclude_last=False
+            )
 
         # The threshold check lives here rather than in a method of its own --
         # it is one comparison with a single caller.
@@ -84,12 +146,16 @@ class SummarizationService:
         Generates an updated summary via Gemini and persists it as the conversation's new checkpoint.
 
         Parameters:
-        - conversation_id (str): the conversation to summarize — comes from summarize_conversation_if_needed
-        - summary (str | None): the prior summary, if any — comes from summarize_conversation_if_needed
-        - recent_messages (list): messages to fold into the summary — comes from summarize_conversation_if_needed
+        - conversation_id (str): the conversation to summarize — comes from _summarize_conversation_if_needed
+        - summary (str | None): the prior summary, if any — comes from _summarize_conversation_if_needed
+        - recent_messages (list): messages to fold into the summary, already detached from the read session — comes from _summarize_conversation_if_needed
 
         Returns:
         - None: stores the updated summary and checkpoint via ConversationService.mark_summarized_up_to
+
+        NO DATABASE TRANSACTION IS OPEN while the model call runs. The rows
+        were read and released by the caller; the write below opens a fresh,
+        short-lived one.
         """
         if not recent_messages:
             return
@@ -117,8 +183,16 @@ class SummarizationService:
         )
 
         newest_index = recent_messages[-1].order_index
-        await self.conversation_service.mark_summarized_up_to(
-            conversation_id=conversation_id,
-            order_index=newest_index,
-            summary_text=updated_summary
-        )
+
+        # --- Write, in its own short-lived session -------------------------
+        # mark_summarized_up_to drops the write if a NEWER checkpoint is
+        # already stored, which is what makes it safe for two summarization
+        # runs to overlap: without that guard the slower one would finish last
+        # and wind both the checkpoint and the summary text backwards.
+        async with SessionLocal() as write_session:
+            conversation_service = ConversationService(db=write_session)
+            await conversation_service.mark_summarized_up_to(
+                conversation_id=conversation_id,
+                order_index=newest_index,
+                summary_text=updated_summary
+            )

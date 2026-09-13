@@ -33,6 +33,9 @@ class SiteImage(Base):
     image_path   S3 object KEY only, e.g. "about_me/main_img.png" -- never a
                  full URL, never the image bytes. The frontend resolves it
                  against the CloudFront base in src/lib/assetUrl.ts.
+                 Despite the name it holds any asset key, not only pictures:
+                 project demo clips are .mp4 keys, and the CV is a .pdf key
+                 (section "personal_statement", description "resume").
     created_at   defaults to now(). Reads take the newest row for a given
                  (section, description) -- newest created_at, then highest
                  id -- so old rows stay as restorable history, exactly like

@@ -1,5 +1,5 @@
 # --- Stage 1: Builder ---
-FROM python:3.11-slim as builder
+FROM python:3.11-slim AS builder
 
 WORKDIR /app
 
@@ -37,12 +37,32 @@ COPY --from=builder /app/requirements.txt .
 # Install dependencies (no virtual environment needed in container)
 RUN pip install --no-cache-dir /wheels/* && rm -rf /wheels
 
+# Non-root. The app writes nothing to disk, reads its GCP credential from a
+# read-only mount and its database URL from the environment, so there is no
+# reason for it to run as uid 0 with a writable copy of its own source. Created
+# before COPY so the source lands already owned by it.
+#
+# A fixed uid (not just a name) so a bind-mounted volume in the local compose
+# file has predictable ownership across machines.
+RUN useradd --create-home --uid 10001 appuser
+
 # Copy application code
-COPY . .
+COPY --chown=appuser:appuser . .
+
+USER appuser
 
 EXPOSE 8000
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
-    CMD curl -f http://localhost:8000/docs || exit 1
+    CMD curl -f http://127.0.0.1:8000/docs || exit 1
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+# NO --reload. It is a development flag: it starts a supervisor process plus a
+# worker and installs a filesystem watcher over /app, which in a deployed
+# container walks a tree that never changes, forever, on an instance whose CPU
+# credits are the scarce resource. It is also a correctness hazard -- any write
+# into /app restarts the worker, and a restart drops every in-flight rate-limit
+# slot and per-session lock RateControlService is holding.
+#
+# Local development gets it back as a `command:` override in
+# docker-compose.yml, which is the file that actually bind-mounts the source.
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

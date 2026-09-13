@@ -25,8 +25,8 @@ async def get_all_site_content(service: SiteContentService = Depends()):
       } -- sent back as the JSON response
     """
     return {
-        "content": service.get_all_current(),
-        "images": service.get_all_images(),
-        "journeyDetails": service.get_all_journey_details(),
-        "projectDetails": service.get_all_project_details(),
+        "content": await service.get_all_current(),
+        "images": await service.get_all_images(),
+        "journeyDetails": await service.get_all_journey_details(),
+        "projectDetails": await service.get_all_project_details(),
     }

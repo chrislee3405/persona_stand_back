@@ -1,7 +1,9 @@
 import uuid
-from sqlalchemy.orm import Session
-from sqlalchemy import func
+
 from fastapi import Depends
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.constants import GUEST_CODE, NON_PROMPT_SENDERS, Sender
 from app.database import get_db
 from app.models import conversation as conversation_models
@@ -24,19 +26,19 @@ class ConversationCodeAlreadyLinkedError(Exception):
 
 class ConversationService:
 
-    def __init__(self, db: Session = Depends(get_db)):
+    def __init__(self, db: AsyncSession = Depends(get_db)):
         """
         Stores the injected database session.
 
         Parameters:
-        - db (Session): SQLAlchemy session — injected by FastAPI via get_db
+        - db (AsyncSession): SQLAlchemy async session — injected by FastAPI via get_db
 
         Returns:
         - None: sets self.db
         """
         self.db = db
 
-    def get_conversation_unlocked(self, conversation_id: str) -> conversation_models.Conversation | None:
+    async def get_conversation_unlocked(self, conversation_id: str) -> conversation_models.Conversation | None:
         """
         Looks up a conversation row by id without locking it.
 
@@ -46,13 +48,14 @@ class ConversationService:
         Returns:
         - Conversation | None: the matching row, or None if it doesn't exist — goes to the caller
         """
-        return (
-            self.db.query(conversation_models.Conversation)
-            .filter(conversation_models.Conversation.conversation_id == conversation_id)
-            .first()
+        result = await self.db.execute(
+            select(conversation_models.Conversation).where(
+                conversation_models.Conversation.conversation_id == conversation_id
+            )
         )
+        return result.scalar_one_or_none()
 
-    def get_conversation_locked(self, conversation_id: str) -> conversation_models.Conversation | None:
+    async def get_conversation_locked(self, conversation_id: str) -> conversation_models.Conversation | None:
         """
         Looks up a conversation row by id and locks it for the rest of the current transaction.
 
@@ -61,13 +64,21 @@ class ConversationService:
 
         Returns:
         - Conversation | None: the matching row, or None if it doesn't exist — goes to the caller
+
+        ONLY for callers that commit promptly. The lock is held until this
+        session's transaction ends, so a caller that takes it and then awaits
+        something slow pins both a row lock and a pooled connection for that
+        whole time. append_message (which needs it, to allocate order_index
+        without a race) commits within microseconds; get_recent_messages
+        deliberately does NOT use this, because its caller goes on to make
+        6-11 Gemini calls before anything commits.
         """
-        return (
-            self.db.query(conversation_models.Conversation)
-            .filter(conversation_models.Conversation.conversation_id == conversation_id)
+        result = await self.db.execute(
+            select(conversation_models.Conversation)
+            .where(conversation_models.Conversation.conversation_id == conversation_id)
             .with_for_update()
-            .first()
         )
+        return result.scalar_one_or_none()
 
     def assert_ownership(self, conversation: conversation_models.Conversation, session_id: str) -> None:
         """
@@ -85,14 +96,14 @@ class ConversationService:
 
     def _create_conversation(self, code: str | None, session_id: str) -> conversation_models.Conversation:
         """
-        Inserts a new conversation row owned by the given session.
+        Builds a new conversation row owned by the given session and adds it to the session.
 
         Parameters:
         - code (str | None): invite code to store, defaults to GUEST_CODE — comes from the caller
         - session_id (str): the owning session — comes from the caller
 
         Returns:
-        - Conversation: the newly created row — goes to append_message
+        - Conversation: the pending row — goes to append_message, which flushes and commits it
         """
         entry = conversation_models.Conversation(
             conversation_id=str(uuid.uuid4()),
@@ -100,7 +111,6 @@ class ConversationService:
             owner_session_id=session_id
         )
         self.db.add(entry)
-        self.db.flush()
         return entry
 
     async def append_message(self, conversation_id: str | None, code: str | None, session_id: str, sender: str, text: str, selected_scenario: str | None = None, selected_document: str | None = None) -> tuple[conversation_models.Message, str]:
@@ -111,29 +121,34 @@ class ConversationService:
         - conversation_id (str | None): conversation to append to, or None to create one — comes from the router
         - code (str | None): invite code for a newly created conversation — comes from the router
         - session_id (str): the caller's session — comes from the router
-        - sender (str): "user" or "backend" — comes from the router
-        - text (str): the message content — comes from the router
-        - selected_scenario (str | None): scenario topics used to generate this message, backend messages only — comes from the router
-        - selected_document (str | None): document topics used to generate this message, backend messages only — comes from the router
+        - sender (str): one of app.constants.Sender — comes from the caller
+        - text (str): the message content — comes from the caller
+        - selected_scenario (str | None): scenario topics used to generate this message, backend messages only — comes from the caller
+        - selected_document (str | None): document topics used to generate this message, backend messages only — comes from the caller
 
         Returns:
-        - tuple[Message, str]: the created message and its conversation's id — goes to the router
+        - tuple[Message, str]: the created message and its conversation's id — goes to the caller
+
+        Takes the row lock and commits inside one call, so the lock is held
+        only for the flush -- long enough to allocate order_index without two
+        concurrent appends colliding on the (conversation_id, order_index)
+        unique constraint, and no longer.
         """
         if conversation_id:
-            conversation = self.get_conversation_locked(conversation_id)
+            conversation = await self.get_conversation_locked(conversation_id)
             if conversation is None:
                 raise ConversationNotFoundError(conversation_id)
             self.assert_ownership(conversation, session_id)
         else:
             conversation = self._create_conversation(code, session_id)
+            await self.db.flush()
 
-        next_index = (
-            self.db.query(
-                func.coalesce(func.max(conversation_models.Message.order_index), -1)
+        result = await self.db.execute(
+            select(func.coalesce(func.max(conversation_models.Message.order_index), -1)).where(
+                conversation_models.Message.conversation_id == conversation.conversation_id
             )
-            .filter(conversation_models.Message.conversation_id == conversation.conversation_id)
-            .scalar()
-        ) + 1
+        )
+        next_index = result.scalar_one() + 1
 
         message = conversation_models.Message(
             conversation_id=conversation.conversation_id,
@@ -144,8 +159,8 @@ class ConversationService:
             selected_document=selected_document
         )
         self.db.add(message)
-        self.db.commit()
-        self.db.refresh(message)
+        await self.db.commit()
+        await self.db.refresh(message)
         return message, conversation.conversation_id
 
     async def retag_message_sender(self, message: conversation_models.Message, sender: str) -> None:
@@ -160,13 +175,15 @@ class ConversationService:
         - None: updates the row in the database.
 
         The one caller retags a stored USER message to Sender.NOT_SAVED_USER
-        when its turn failed before producing a reply. The row is kept so the
-        owner can see what was asked, and the retag is what removes it from the
-        next prompt's history -- get_recent_messages filters
-        NON_PROMPT_SENDERS in SQL, and NOT_SAVED_USER is in that tuple.
+        when its turn failed before producing a reply -- including when the
+        turn ran past TURN_DEADLINE_SECONDS. The row is kept so the owner can
+        see what was asked, and the retag is what removes it from the next
+        prompt's history -- get_recent_messages filters NON_PROMPT_SENDERS in
+        SQL, and NOT_SAVED_USER is in that tuple.
         """
         message.sender = sender
-        self.db.commit()
+        self.db.add(message)
+        await self.db.commit()
 
     async def get_recent_messages(self, conversation_id: str, exclude_last: bool = True) -> list[conversation_models.Message]:
         """
@@ -178,21 +195,32 @@ class ConversationService:
 
         Returns:
         - list[Message]: the real conversation after last_summarized_index, oldest first — goes to the caller (e.g. ContextGatherer, SummarizationService). Three kinds of row are removed, so no failed or discarded turn can reappear as if it were a real exchange:
-          - sender="error" (a turn that raised, or ResponseGate.check exhausting its retries) and sender="regen" (rejected intermediate attempts) are excluded in SQL via NON_PROMPT_SENDERS;
+          - sender="error" (a turn that raised, timed out, or exhausted ResponseGate's retries), sender="regen" (rejected intermediate attempts) and sender="not_saved_user" (a visitor message whose turn never produced a reply) are excluded in SQL via NON_PROMPT_SENDERS;
           - sender="system" (the ResponseGate fallback notice: "Sorry, I couldn't put together a suitable reply...") is dropped in Python, TOGETHER WITH the user message it answered. A fallback means the persona never actually replied, so leaving either behind poisons the next prompt -- the notice gets read back as the persona's own words ('You: Sorry, I couldn't...'), and the unanswered question looks like it was already dealt with. Handled here rather than in the SQL filter precisely because the pairing needs the system row to still be visible.
+
+        Reads WITHOUT a row lock, deliberately. This used to take
+        `SELECT ... FOR UPDATE` and its caller (ContextGatherer.gather) then
+        made up to five sequential Gemini calls before anything committed --
+        holding a conversation row lock and a pooled connection for as long as
+        the model took. Nothing needs the lock: a session's turns are already
+        serialised by RateControlService.turn, and no other session can reach
+        this conversation (assert_ownership). The only writer that allocates
+        anything order-sensitive is append_message, which takes its own lock.
         """
-        conversation = self.get_conversation_locked(conversation_id)
+        conversation = await self.get_conversation_unlocked(conversation_id)
         if conversation is None:
             raise ConversationNotFoundError(conversation_id)
 
-        recent_messages = (
-            self.db.query(conversation_models.Message)
-            .filter(
+        result = await self.db.execute(
+            select(conversation_models.Message)
+            .where(
                 conversation_models.Message.conversation_id == conversation_id,
                 conversation_models.Message.order_index > conversation.last_summarized_index,
-                conversation_models.Message.sender.notin_(NON_PROMPT_SENDERS))
+                conversation_models.Message.sender.notin_(NON_PROMPT_SENDERS),
+            )
             .order_by(conversation_models.Message.order_index.asc())
-            .all())
+        )
+        recent_messages = list(result.scalars().all())
 
         recent_messages = self._drop_withheld_turns(recent_messages)
 
@@ -233,18 +261,29 @@ class ConversationService:
         - summary_text (str | None): the updated summary text — comes from SummarizationService
 
         Returns:
-        - None: updates the conversation row in the database
+        - None: updates the conversation row in the database, or returns without writing if a newer checkpoint is already stored
+
+        This is the ONLY part of summarization that holds a lock, and it is
+        taken here rather than around the whole job: the caller reads its
+        messages, ends that transaction, spends several seconds in Gemini, and
+        only then calls this. The `order_index <=` guard is what makes that
+        safe -- two summarization runs can overlap, and the older one's result
+        must not overwrite the newer one's checkpoint or its summary text.
         """
-        conversation = self.get_conversation_locked(conversation_id)
+        conversation = await self.get_conversation_locked(conversation_id)
         if conversation is None:
+            await self.db.rollback()
             return
         if order_index <= conversation.last_summarized_index:
-            # Drop the response as there are a newer version summary in db already
+            # A newer summary is already stored -- drop this one rather than
+            # winding the checkpoint backwards. Roll back so the FOR UPDATE
+            # lock taken above is released immediately.
+            await self.db.rollback()
             return
         conversation.last_summarized_index = order_index
         if summary_text is not None:
             conversation.summary = summary_text
-        self.db.commit()
+        await self.db.commit()
 
     async def update_conversation_code(self, conversation_id: str, code: str, session_id: str) -> None:
         """
@@ -257,8 +296,14 @@ class ConversationService:
 
         Returns:
         - None: updates the conversation row in the database
+
+        Does NOT commit. The caller (CodeService.match_code) is part of the
+        session-rotation transaction in codes_router, which has to move
+        conversation ownership and consent records to a new session id and
+        link this code as one atomic unit -- so the commit belongs to whoever
+        owns that transaction, not here.
         """
-        conversation = self.get_conversation_locked(conversation_id)
+        conversation = await self.get_conversation_locked(conversation_id)
         if conversation is None:
             return
         self.assert_ownership(conversation, session_id)
@@ -269,4 +314,30 @@ class ConversationService:
             # conversation is billed/attributed to.
             raise ConversationCodeAlreadyLinkedError()
         conversation.code = code
-        self.db.commit()
+
+    async def transfer_ownership(self, old_session_id: str, new_session_id: str) -> int:
+        """
+        Re-points every conversation owned by one session id at another.
+
+        Parameters:
+        - old_session_id (str): the session id being retired — comes from codes_router's session rotation
+        - new_session_id (str): the freshly-minted session id — comes from codes_router
+
+        Returns:
+        - int: how many conversations moved — goes to codes_router for logging
+
+        Does NOT commit: this is one step of the rotation transaction, which
+        must move conversations AND consent records AND link the invite code
+        together or not at all. A partial rotation would strand the visitor --
+        a new session id owning none of their history, with the old id
+        unreachable because the cookie has already been replaced.
+        """
+        result = await self.db.execute(
+            select(conversation_models.Conversation).where(
+                conversation_models.Conversation.owner_session_id == old_session_id
+            )
+        )
+        conversations = list(result.scalars().all())
+        for conversation in conversations:
+            conversation.owner_session_id = new_session_id
+        return len(conversations)
