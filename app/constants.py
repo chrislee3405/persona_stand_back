@@ -49,29 +49,28 @@ class Sender(StrEnum):
     REGEN = "regen"      # a response-gate attempt that was rejected
 
     # A visitor message whose turn failed before a reply existed (see
-    # ChatService.handle_chat_turn's model_orchestration except branch).
+    # ChatService._handle_failed_turn). The row is kept verbatim so the app
+    # owner can see what was being asked; the retag only removes it from the
+    # next prompt's history, where "user" would read as a question already
+    # answered.
     #
-    # "not saved" means NOT SAVED INTO THE CONVERSATION -- the row itself is
-    # very much still in the message table, kept verbatim so the app owner
-    # can see what was being asked when the failure happened. That is the
-    # whole reason it is not deleted. What the retag removes it from is the
-    # next prompt's history: left as "user" it read back to the model as a
-    # question already put to the persona and already dealt with, when in
-    # fact nothing ever answered it.
-    NOT_SAVED_USER = "not_saved_user"
+    # The stored VALUE keeps its original spelling: existing message rows
+    # carry it, and renaming it would silently return those rows to prompt
+    # history.
+    UNANSWERED_USER = "not_saved_user"
 
 
 # Senders excluded from live prompt history AND from summarization, so a
 # failed or discarded attempt never reappears as if it were a real reply.
 # Consumed by ConversationService.get_recent_messages.
-NON_PROMPT_SENDERS = (Sender.ERROR, Sender.REGEN, Sender.NOT_SAVED_USER)
+NON_PROMPT_SENDERS = (Sender.ERROR, Sender.REGEN, Sender.UNANSWERED_USER)
 
 
 # --- Turn deadline -------------------------------------------------------
-# Whole-turn wall clock ceiling, seconds. A turn makes 6-11 sequential Gemini
-# calls, each with its own 30s ceiling (_REQUEST_TIMEOUT_MS in
+# Whole-turn wall clock ceiling, seconds. A turn makes 4-12 sequential Gemini
+# calls (guest at most 8), each with its own 30s ceiling (_REQUEST_TIMEOUT_MS in
 # app/services/ai/gemini_service.py), so the per-call timeout alone bounds a
-# turn at ~330s -- far past nginx's proxy_read_timeout (120s in
+# turn at ~360s -- far past nginx's proxy_read_timeout (120s in
 # persona_stand_front/nginx.conf).
 #
 # When nginx gives up first the visitor gets a 504 while this process happily
@@ -82,7 +81,7 @@ NON_PROMPT_SENDERS = (Sender.ERROR, Sender.REGEN, Sender.NOT_SAVED_USER)
 #
 # This deadline makes the backend give up FIRST, so the failure is one we
 # control: ChatService treats it exactly like any other generation failure --
-# the visitor's message is retagged Sender.NOT_SAVED_USER and no Sender.BACKEND
+# the visitor's message is retagged Sender.UNANSWERED_USER and no Sender.BACKEND
 # row is ever written, so nothing from a timed-out turn reaches the next
 # prompt's history.
 #

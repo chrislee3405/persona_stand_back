@@ -1,4 +1,4 @@
-from app.services.model_collarborate.prepare_history import prepare_history
+from app.services.model_collaborate.prepare_history import prepare_history
 
 # ─────────────────────────── Two-stage generation ───────────────────────────
 #
@@ -183,7 +183,7 @@ def _grounding_section(grounding: dict, prefer_name: str) -> str:
     Renders Stage 1's verdict into the instruction block Stage 2 reads.
 
     Parameters:
-    - grounding (dict): {"question_type", "coverage", "facts", "missing"} — comes from ModelCollaborateService._ground
+    - grounding (dict): {"question_type", "coverage", "facts", "missing"} — comes from GroundingService.ground via ModelCollaborateService.model_orchestration and build_reply
     - prefer_name (str): the candidate's preferred name — comes from ContextGatherer.gather via build_reply, interpolated into every decline instruction so the model is never handed the third-person phrase "the candidate" to copy
 
     Returns:

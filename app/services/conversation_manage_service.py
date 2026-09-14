@@ -71,7 +71,7 @@ class ConversationService:
         whole time. append_message (which needs it, to allocate order_index
         without a race) commits within microseconds; get_recent_messages
         deliberately does NOT use this, because its caller goes on to make
-        6-11 Gemini calls before anything commits.
+        4-12 Gemini calls before anything commits.
         """
         result = await self.db.execute(
             select(conversation_models.Conversation)
@@ -174,12 +174,12 @@ class ConversationService:
         Returns:
         - None: updates the row in the database.
 
-        The one caller retags a stored USER message to Sender.NOT_SAVED_USER
-        when its turn failed before producing a reply -- including when the
-        turn ran past TURN_DEADLINE_SECONDS. The row is kept so the owner can
-        see what was asked, and the retag is what removes it from the next
-        prompt's history -- get_recent_messages filters NON_PROMPT_SENDERS in
-        SQL, and NOT_SAVED_USER is in that tuple.
+        The one caller (ChatService._handle_failed_turn) retags a stored USER
+        message to Sender.UNANSWERED_USER when its turn failed before producing
+        a reply -- including when the turn ran past TURN_DEADLINE_SECONDS. The
+        row is kept so the owner can see what was asked, and the retag is what
+        removes it from the next prompt's history -- get_recent_messages
+        filters NON_PROMPT_SENDERS in SQL, and UNANSWERED_USER is in that tuple.
         """
         message.sender = sender
         self.db.add(message)

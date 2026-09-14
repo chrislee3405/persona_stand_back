@@ -14,7 +14,7 @@ async def get_all_site_content(service: SiteContentService = Depends()):
     it never fetches a single section on its own.
 
     Parameters:
-    - service (SiteContentService): reads the newest row per section (text), per (section, description) slot (images) and per journey block (detail sheets) -- injected by FastAPI
+    - service (SiteContentService): reads the highest-id row per section (text), per (section, description) slot (images), per journey block and per project (detail sheets) -- injected by FastAPI
 
     Returns:
     - dict: {

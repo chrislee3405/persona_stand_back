@@ -21,8 +21,12 @@ class SiteContentService:
     site_content holds one row per version of each section (see
     app/models/site_content.py): a change is a new INSERT with the same
     `section` slug, never an in-place UPDATE. Every read here takes the
-    newest row for a section -- highest `created_at`, with `id` breaking
-    ties -- so older versions stay in the table as restorable history.
+    row with the highest `id` for a section, so older versions stay in the
+    table as restorable history. `created_at` is record metadata and plays no
+    part in choosing the current version: these tables are single-owner,
+    low-write and append-only, so the highest id reliably IS the latest write,
+    and ordering by id lets each query read straight off its (key, id DESC)
+    index instead of sorting.
 
     `content` is JSONB; its shape depends on the section (an object for
     prose sections, a list for the journey timeline). This service passes
@@ -35,7 +39,7 @@ class SiteContentService:
     Images are kept out of `content` entirely -- they live in the
     `site_image` table (app/models/site_image.py), one row per version of
     each (section, description) image slot, and get_all_images() reads them
-    with the same "newest row wins" rule. The Journey click-through detail
+    with the same "highest id wins" rule. The Journey click-through detail
     sheets live in `site_journey` (app/models/site_journey.py), read by
     get_all_journey_details() the same way.
 
@@ -63,12 +67,12 @@ class SiteContentService:
         - none
 
         Returns:
-        - dict[str, Any]: section slug -> content (a dict or list, per the section's shape), one entry per distinct section (its newest row). Empty dict if site_content has no rows. Uses Postgres DISTINCT ON (section) with a matching ORDER BY so exactly the newest row per section comes back.
+        - dict[str, Any]: section slug -> content (a dict or list, per the section's shape), one entry per distinct section (its highest-id row). Empty dict if site_content has no rows. Uses Postgres DISTINCT ON (section) with a matching ORDER BY so exactly the highest-id row per section comes back.
         """
         result = await self.db.execute(
             select(SiteContent)
             .distinct(SiteContent.section)
-            .order_by(SiteContent.section, desc(SiteContent.created_at), desc(SiteContent.id))
+            .order_by(SiteContent.section, desc(SiteContent.id))
         )
         return {row.section: row.content for row in result.scalars().all()}
 
@@ -80,7 +84,7 @@ class SiteContentService:
         - none
 
         Returns:
-        - dict[str, list[dict[str, str]]]: section slug -> list of {"description": ..., "path": ...} (the S3 object key), one entry per distinct (section, description) slot (its newest row). Empty dict if site_image has no rows. Uses Postgres DISTINCT ON (section, description) with a matching ORDER BY so exactly the newest row per slot comes back.
+        - dict[str, list[dict[str, str]]]: section slug -> list of {"description": ..., "path": ...} (the S3 object key), one entry per distinct (section, description) slot (its highest-id row). Empty dict if site_image has no rows. Uses Postgres DISTINCT ON (section, description) with a matching ORDER BY so exactly the highest-id row per slot comes back.
         """
         result = await self.db.execute(
             select(SiteImage)
@@ -88,7 +92,6 @@ class SiteContentService:
             .order_by(
                 SiteImage.section,
                 SiteImage.description,
-                desc(SiteImage.created_at),
                 desc(SiteImage.id),
             )
         )
@@ -107,14 +110,13 @@ class SiteContentService:
         - none
 
         Returns:
-        - dict[str, Any]: journey_id -> content (a dict, per site_journey's shape), one entry per distinct journey_id (its newest row). Empty dict if site_journey has no rows.
+        - dict[str, Any]: journey_id -> content (a dict, per site_journey's shape), one entry per distinct journey_id (its highest-id row). Empty dict if site_journey has no rows.
         """
         result = await self.db.execute(
             select(SiteJourney)
             .distinct(SiteJourney.journey_id)
             .order_by(
                 SiteJourney.journey_id,
-                desc(SiteJourney.created_at),
                 desc(SiteJourney.id),
             )
         )
@@ -128,14 +130,13 @@ class SiteContentService:
         - none
 
         Returns:
-        - dict[str, Any]: project_id -> content (a dict, per site_project's shape), one entry per distinct project_id (its newest row). Empty dict if site_project has no rows.
+        - dict[str, Any]: project_id -> content (a dict, per site_project's shape), one entry per distinct project_id (its highest-id row). Empty dict if site_project has no rows.
         """
         result = await self.db.execute(
             select(SiteProject)
             .distinct(SiteProject.project_id)
             .order_by(
                 SiteProject.project_id,
-                desc(SiteProject.created_at),
                 desc(SiteProject.id),
             )
         )

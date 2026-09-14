@@ -9,7 +9,7 @@ from app.database import get_db
 from app.services.ai.gemini_service import GeminiService
 from app.services.bm25_service import BM25Service
 from app.services.conversation_manage_service import ConversationService
-from app.services.model_collarborate.prepare_history import prepare_history
+from app.services.model_collaborate.prepare_history import prepare_history
 from app.models.prompt_reference import DocReference, PersonalityReference, ScenarioReference
 
 logger = logging.getLogger(__name__)

@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, Index
+from sqlalchemy import Column, Integer, String, DateTime, Index, desc
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.sql import func
 from app.database import Base
@@ -11,10 +11,10 @@ class SiteContent(Base):
     timeline, and so on.
 
     To change a section, INSERT a new row with the same `section` value;
-    never edit an existing row in place. Reads always take the newest row
-    (highest `created_at`, then highest `id` as a tie-breaker) for a given
-    `section`, so the previous version stays in the table as history and
-    can be restored by inserting it again.
+    never edit an existing row in place. Reads always take the row with the
+    highest `id` for a given `section`, so the previous version stays in the
+    table as history and can be restored by inserting it again. `created_at`
+    is record metadata; it does not decide which version is current.
 
     `section` is a stable slug the frontend and back-end agree on. The
     sections and the exact JSON shape the frontend expects for each are
@@ -325,13 +325,17 @@ class SiteContent(Base):
     """
     __tablename__ = "site_content"
     __table_args__ = (
-        # Serves the only query this table has: "newest row for this
-        # section" (and the Postgres DISTINCT ON form that fetches the
-        # newest row for every section at once).
-        Index("ix_site_content_section_created_at", "section", "created_at"),
+        # (key, id DESC): exactly the order the "current version" query reads
+        # -- one index scan, no sort. The current version is the highest id,
+        # not the newest created_at: these tables are single-owner, low-write
+        # and append-only, so id order IS write order on the application's
+        # write path, and created_at is kept as record metadata only.
+        # EXISTING DATABASES need this by hand -- create_all never adds an
+        # index to a table it did not create. See persona_stand_ec2yml/Part_C.md.
+        Index("ix_site_content_section_id_desc", "section", desc("id")),
     )
 
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column(Integer, primary_key=True)
     section = Column(String, nullable=False)
     content = Column(JSONB, nullable=False)
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())

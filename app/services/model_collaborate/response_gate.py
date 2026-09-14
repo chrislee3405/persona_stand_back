@@ -5,7 +5,7 @@ from fastapi import Depends
 from app.constants import DEFAULT_MODEL, Sender
 from app.services.ai.gemini_service import GeminiService
 from app.services.conversation_manage_service import ConversationService
-from app.services.model_collarborate.prepare_history import prepare_history
+from app.services.model_collaborate.prepare_history import prepare_history
 
 logger = logging.getLogger(__name__)
 

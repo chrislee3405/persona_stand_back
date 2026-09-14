@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, Index
+from sqlalchemy import Column, Integer, String, DateTime, Index, desc
 from sqlalchemy.sql import func
 from app.database import Base
 
@@ -36,21 +36,26 @@ class SiteImage(Base):
                  Despite the name it holds any asset key, not only pictures:
                  project demo clips are .mp4 keys, and the CV is a .pdf key
                  (section "personal_statement", description "resume").
-    created_at   defaults to now(). Reads take the newest row for a given
-                 (section, description) -- newest created_at, then highest
-                 id -- so old rows stay as restorable history, exactly like
+    created_at   defaults to now(); record metadata only. Reads take the row
+                 with the highest id for a given (section, description), so
+                 old rows stay as restorable history, exactly like
                  site_content. Never UPDATE a row; INSERT a new one.
 
     See also persona_stand_ec2yml/Part_D.md (D.2 seed SQL, D.5 shapes).
     """
     __tablename__ = "site_image"
     __table_args__ = (
-        # Serves the only query this table has: "newest row for this
-        # (section, description)" and "newest row per slot for a section".
-        Index("ix_site_image_section_description_created_at", "section", "description", "created_at"),
+        # (section, description, id DESC) -- the slot, then id: exactly the
+        # order the "current version" query reads -- one index scan, no sort. The current version is the highest id,
+        # not the newest created_at: these tables are single-owner, low-write
+        # and append-only, so id order IS write order on the application's
+        # write path, and created_at is kept as record metadata only.
+        # EXISTING DATABASES need this by hand -- create_all never adds an
+        # index to a table it did not create. See persona_stand_ec2yml/Part_C.md.
+        Index("ix_site_image_section_description_id_desc", "section", "description", desc("id")),
     )
 
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column(Integer, primary_key=True)
     section = Column(String, nullable=False)
     description = Column(String, nullable=False)
     image_path = Column(String, nullable=False)

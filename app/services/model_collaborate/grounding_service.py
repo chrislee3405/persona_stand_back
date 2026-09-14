@@ -4,7 +4,7 @@ from fastapi import Depends
 
 from app.constants import DEFAULT_MODEL
 from app.services.ai.gemini_service import GeminiService
-from app.services.model_collarborate.prepare_history import prepare_history
+from app.services.model_collaborate.prepare_history import prepare_history
 
 logger = logging.getLogger(__name__)
 
@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 # WHY THIS IS A SEPARATE CALL. A single prompt carrying identity, personality,
 # voice, punctuation, history rules AND grounding rules reliably invented
 # facts: an ablation over three real failures (persona_stand_back/
-# ablation_test.py) scored 8-10 out of 15 fabrications with the 6,535-char
+# probe_ablation.py) scored 8-10 out of 15 fabrications with the 6,535-char
 # combined prompt, and 0 out of 15 with a 329-char prompt that did nothing but
 # ground. The rule that has to win was ~5% of the old prompt and lost to
 # everything around it. Here it is nearly all of the prompt.

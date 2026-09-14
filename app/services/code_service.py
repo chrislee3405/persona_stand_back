@@ -27,7 +27,7 @@ class CodeService:
         self.db = db
         self.conversation_service = conversation_service
 
-    async def match_code(self, input_code: str, conversation_id: str | None, session_id: str) -> str:
+    async def match_code(self, input_code: str, conversation_id: str | None, session_id: str) -> code_models.InviteCode:
         """
         Verifies a submitted invite code and, if tied to a conversation, upgrades that conversation off the guest code.
 
@@ -37,7 +37,8 @@ class CodeService:
         - session_id (str): the caller's session — comes from codes_router.verify_code
 
         Returns:
-        - str: the matched code — goes back to codes_router.verify_code, then to the client and into the session cookie
+        - InviteCode: the matched row — goes back to codes_router.verify_code, which puts its `id` (never
+          its `code`) into the session cookie; see set_verified_invite_code_id for why
 
         Does NOT commit. codes_router wraps this call, the session-id rotation
         and the ownership transfer in one transaction, so the conversation is
@@ -59,13 +60,32 @@ class CodeService:
         if matched is None:
             raise InvalidCodeError(input_code)
 
-        processed_result = matched.code
-
         if conversation_id:
             await self.conversation_service.update_conversation_code(
                 conversation_id=conversation_id,
-                code=processed_result,
+                code=matched.code,
                 session_id=session_id
             )
 
-        return processed_result
+        return matched
+
+    async def get_by_id(self, invite_code_id: int) -> code_models.InviteCode | None:
+        """
+        Resolves the invite-code id a verified session carries back to its row.
+
+        Parameters:
+        - invite_code_id (int): the id stored in the session by codes_router — comes from conversations_router.invitechat
+
+        Returns:
+        - InviteCode | None: the row, or None if the code has since been deleted. None
+          means the session is no longer verified: removing a row from `code` is how
+          an invite is revoked, and every session holding its id loses invite tier on
+          its next request.
+
+        A lookup by primary key, not a re-validation of anything the client sent --
+        the id came from the signed session, which only codes_router writes.
+        """
+        result = await self.db.execute(
+            select(code_models.InviteCode).where(code_models.InviteCode.id == invite_code_id)
+        )
+        return result.scalar_one_or_none()

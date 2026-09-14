@@ -30,9 +30,10 @@ Thumbs.db
 
 # 6. GCP related
 adc.json
-# 9. Local test harnesses (may reference personal reference data)
-ablation_test.py
-naturalness_test.py
+# 9. Local model probes (may reference personal reference data). Named
+# probe_*.py, not *_test.py: they are one-off experiments against the live
+# database and Gemini, not tests, and pytest would collect a *_test.py.
+probe_*.py
 
 # 10. Real site content and personal reference data -- NEVER COMMIT.
 # This repository is PUBLIC. These files hold the owner's real CV, academic
@@ -41,6 +42,7 @@ naturalness_test.py
 audit/
 # The seed files carrying that data stay on disk for local seeding (the
 # loader skips any file that is absent, so a fresh clone still works).
-# Only the file with no personal content are committed.
+# Only consent_policy.json, which is public text, is committed. invite_code.json
+# stays ignored too: a working invite code does not belong in a public repo.
 app/models/seed/*.json
 !app/models/seed/consent_policy.json

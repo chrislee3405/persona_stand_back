@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, Index
+from sqlalchemy import Column, Integer, String, DateTime, Index, desc
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.sql import func
 from app.database import Base
@@ -17,19 +17,18 @@ class SiteProject(Base):
     edited on different schedules and a project can exist in the banner with
     no detail sheet yet (its thumbnail just is not clickable).
 
-    Same "newest row wins, never UPDATE" rule as the rest of the site_*
+    Same "highest id wins, never UPDATE" rule as the rest of the site_*
     tables: to change a project's detail, INSERT a new row with the same
-    `project_id`; reads take the newest row (highest created_at, then id)
-    per project_id.
+    `project_id`; reads take the row with the highest id per project_id.
 
     Columns
     -------
     id          serial PK.
     project_id  The `id` of the project in the `site_content` "projects"
-                array this detail belongs to, e.g. "ransom-simulator". Not a
+                array this detail belongs to, e.g. "persona-stand". Not a
                 DB foreign key (the projects array is JSONB) -- the writer
                 keeps the two in sync. One logical detail per project_id;
-                its newest row wins.
+                its highest-id row wins.
     content     JSONB. `?` marks optional keys. Templates, not literal JSON:
 
                 {
@@ -69,7 +68,8 @@ class SiteProject(Base):
                 site_image rows referenced by tag, same rule as everything
                 else (see app/models/site_image.py).
 
-    created_at  defaults to now(); newest row per project_id wins.
+    created_at  defaults to now(); record metadata only -- the highest id per
+                project_id is the current version.
 
     Served to the frontend on first paint inside GET /api/site-content as
     `projectDetails: { "<project_id>": <content>, ... }`.
@@ -78,13 +78,17 @@ class SiteProject(Base):
     """
     __tablename__ = "site_project"
     __table_args__ = (
-        # Serves the only query this table has: "newest row for this
-        # project_id" and the DISTINCT ON form that fetches the newest row
-        # for every project_id at once.
-        Index("ix_site_project_project_id_created_at", "project_id", "created_at"),
+        # (key, id DESC): exactly the order the "current version" query reads
+        # -- one index scan, no sort. The current version is the highest id,
+        # not the newest created_at: these tables are single-owner, low-write
+        # and append-only, so id order IS write order on the application's
+        # write path, and created_at is kept as record metadata only.
+        # EXISTING DATABASES need this by hand -- create_all never adds an
+        # index to a table it did not create. See persona_stand_ec2yml/Part_C.md.
+        Index("ix_site_project_project_id_id_desc", "project_id", desc("id")),
     )
 
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column(Integer, primary_key=True)
     project_id = Column(String, nullable=False)
     content = Column(JSONB, nullable=False)
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())

@@ -36,13 +36,15 @@ logger = logging.getLogger(__name__)
 RateTier = Literal["guest", "invite"]
 
 # Hyperparameters -- the one place to tune these.
-# Minimum time between the start of two consecutive message-turns for the
-# same session, in seconds, per tier, WHILE MORE THAN ONE MESSAGE IS IN
-# FLIGHT. Note the qualifier: release_slot drops a session's pacing cursor
-# once its last in-flight message finishes (it has to, or the cursor map
-# grows for every session the process ever sees), so this paces a burst and
-# does not floor the gap between two turns sent one after the other. Bursts
-# are what it was for -- a turn takes seconds anyway.
+# Spacing, in seconds per tier, between the starts of a session's CONCURRENT
+# messages -- ones sent while an earlier message from the same session is
+# still in flight. It paces a burst. It does NOT impose a minimum gap between
+# messages sent one after another: release_slot deletes a session's pacing
+# cursor as soon as its last in-flight message finishes (it has to, or the
+# cursor map grows for every session the process ever sees), so a message
+# sent after the previous reply has landed starts immediately. That is the
+# intended scope -- a single turn already takes seconds, so sequential traffic
+# needs no extra floor, and the daily quotas below are what bound volume.
 _INTERVAL_SECONDS: dict[RateTier, float] = {
     "guest": 3.0,
     "invite": 1.5,
@@ -80,7 +82,7 @@ _MAX_PENDING_PER_IP = 3
 # and how many a single IP may send per day across guest sessions.
 #
 # The three limits above are concurrency and pacing only -- they cap how
-# FAST messages arrive, never how MANY. Each message costs 6-11 Gemini
+# FAST messages arrive, never how MANY. Each message costs 4-12 Gemini
 # calls, so these two are the only thing bounding spend.
 #
 # They are now stored in Postgres (RateLimitCounter), not in this process's
@@ -534,7 +536,11 @@ class RateControlService:
     @asynccontextmanager
     async def turn(self, session_id: str, tier: RateTier):
         """
-        Scopes one message's turn for a session: waits for the session's lock (serializing its turns to one at a time, in arrival order -- so a later message's conversation history always includes an earlier one's already-persisted reply), then sleeps off whatever remains of _INTERVAL_SECONDS[tier] since the previous turn started, before yielding control to the caller. The lock stays held for the caller's entire `async with` block, so the next queued message can't start until this one -- including persisting its reply -- is done.
+        Scopes one message's turn for a session: waits for the session's lock (serializing its turns to one at a time, in arrival order -- so a later message's conversation history always includes an earlier one's already-persisted reply), then, if an earlier CONCURRENT turn from this session set a pacing cursor, sleeps off whatever remains of _INTERVAL_SECONDS[tier] since that turn started, before yielding control to the caller. The lock stays held for the caller's entire `async with` block, so the next queued message can't start until this one -- including persisting its reply -- is done.
+
+        Pacing applies to concurrent messages only. Once a session has nothing
+        in flight, release_slot removes its cursor, so the next message --
+        however soon after the previous reply -- waits for nothing here.
 
         Parameters:
         - session_id (str): the caller's session -- comes from ChatService.handle_chat_turn

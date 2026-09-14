@@ -10,11 +10,10 @@
 # developer's live Google credentials into an image layer.
 adc.json
 
-# Local test harnesses. Gitignored for the same reason they are excluded here:
+# Local model probes. Gitignored for the same reason they are excluded here:
 # they may reference personal reference data, and they are not part of the
 # shipped application.
-ablation_test.py
-naturalness_test.py
+probe_*.py
 venv/
 .venv/
 env/

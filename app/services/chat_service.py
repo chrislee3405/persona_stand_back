@@ -10,11 +10,11 @@ from app.constants import Sender, TURN_DEADLINE_SECONDS
 from app.database import get_db
 from app.services.consent_service import ConsentService
 from app.services.conversation_manage_service import ConversationService, ConversationNotFoundError, ConversationAccessDeniedError
-from app.services.model_collarborate_service import ModelCollaborateService
-from app.services.model_collarborate.response_gate import is_fallback_response
+from app.services.model_collaborate_service import ModelCollaborateService
+from app.services.model_collaborate.response_gate import is_fallback_response
 from app.services.privacy_gate_service import PrivacyGateService
 from app.services.rate_control_service import RateControlService, RateTier, get_rate_control_service
-from app.services.model_collarborate.summarization_service import SummarizationService
+from app.services.model_collaborate.summarization_service import SummarizationService
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +52,7 @@ def _join_topics(topics: list[str] | None) -> str | None:
     Joins multiple matched topics into one comma-separated string, since selected_document/selected_scenario are singular String columns.
 
     Parameters:
-    - topics (list[str] | None): topics matched by ModelCollaborateService.find_topic — comes from ChatService.handle_chat_turn's call to model_orchestration
+    - topics (list[str] | None): topics chosen by ContextGatherer._find_topic — comes from ChatService.handle_chat_turn's call to model_orchestration, which returns them
 
     Returns:
     - str | None: comma-joined topics, or None if empty/missing — goes into Message.selected_document / Message.selected_scenario via ConversationService.append_message
@@ -100,7 +100,7 @@ class ChatService:
         - client_ip (str): the caller's client IP — comes from the router (get_client_ip), used only for the rate control gate's per-IP backstop (guest sessions only, see below)
 
         Returns:
-        - dict: reply split into display turns, sender, conversationId, and userMessageKept — goes back to the router as the response body. userMessageKept is False in the two cases where the message was stored but is not part of the conversation the persona sees: the ResponseGate fallback (_drop_withheld_turns discards the user's message along with the notice), and a failed or timed-out generation (the row is retagged Sender.NOT_SAVED_USER). The frontend reads it to mark that bubble as not answered.
+        - dict: reply split into display turns, sender, conversationId, and userMessageKept — goes back to the router as the response body. userMessageKept is False in the two cases where the message was stored but is not part of the conversation the persona sees: the ResponseGate fallback (_drop_withheld_turns discards the user's message along with the notice), and a failed or timed-out generation (the row is retagged Sender.UNANSWERED_USER). The frontend reads it to mark that bubble as not answered.
         """
         ### message length gate ###
         # Cheapest check, so it runs before anything that costs real work
@@ -206,7 +206,7 @@ class ChatService:
 
                 # 2.    Generate the reply via the AI flow, under a whole-turn
                 #       deadline. See TURN_DEADLINE_SECONDS: without it the
-                #       per-call ceiling bounds a turn at ~330s, nginx gives up
+                #       per-call ceiling bounds a turn at ~360s, nginx gives up
                 #       at 120s, and this process goes on to COMMIT a reply the
                 #       visitor was already told had failed. Timing out here
                 #       instead means the failure is one we control -- and the
@@ -351,13 +351,13 @@ class ChatService:
 
         try:
             await self.conversation_service.retag_message_sender(
-                user_message, Sender.NOT_SAVED_USER
+                user_message, Sender.UNANSWERED_USER
             )
         except Exception:
             logger.exception(
                 "[%s] could not retag the user message to %s -- it will be read back as part of "
                 "the conversation on the next turn",
-                incident_id, Sender.NOT_SAVED_USER,
+                incident_id, Sender.UNANSWERED_USER,
             )
 
         return {

@@ -8,11 +8,11 @@ from app.database import get_db
 from app.services.ai.gemini_service import GeminiService
 from app.services.bm25_service import BM25Service
 from app.services.conversation_manage_service import ConversationService
-from app.services.model_collarborate.context_gatherer import ContextGatherer
-from app.services.model_collarborate.grounding_service import GroundingService
-from app.services.model_collarborate.prompt_builder import PromptBuilder
-from app.services.model_collarborate.response_gate import ResponseGate, is_fallback_response
-from app.services.model_collarborate.response_parser import ResponseParser
+from app.services.model_collaborate.context_gatherer import ContextGatherer
+from app.services.model_collaborate.grounding_service import GroundingService
+from app.services.model_collaborate.prompt_builder import PromptBuilder
+from app.services.model_collaborate.response_gate import ResponseGate, is_fallback_response
+from app.services.model_collaborate.response_parser import ResponseParser
 from app.services.rate_control_service import RateTier
 
 logger = logging.getLogger(__name__)

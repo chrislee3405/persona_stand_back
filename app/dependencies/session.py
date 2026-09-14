@@ -17,17 +17,81 @@ def get_or_create_session_id(request: Request) -> str:
     return request.session["session_id"]
 
 
-def get_verified_code(request: Request) -> str | None:
+# The session key holding a verified session's invite code, BY DATABASE ID.
+#
+# An id, not the code. Starlette's SessionMiddleware SIGNS the session but does
+# not ENCRYPT it -- the cookie value is base64(json) plus an HMAC -- so anything
+# stored here can be read back by anyone holding the cookie with a one-line
+# decode. This key used to hold the invite code itself, which quietly undid
+# codes_router's decision not to echo the credential back: it was handed back
+# anyway, in the Set-Cookie on the same response. An integer primary key is
+# useless to anyone who reads it, and the signature still stops it being
+# forged.
+#
+# It also gives revocation for free: delete a row from `code` and every
+# session verified with it stops being verified on its next request, because
+# the id no longer resolves (see conversations_router.invitechat).
+_INVITE_CODE_ID_KEY = "invite_code_id"
+
+# The key sessions verified before that change still carry, holding the
+# plaintext code. Never read -- only removed -- so a legacy cookie is simply
+# treated as unverified and its holder re-enters their code once.
+_LEGACY_VERIFIED_CODE_KEY = "verified_code"
+
+
+def get_verified_invite_code_id(request: Request) -> int | None:
     """
-    Checks whether the current session has already verified an invite code.
+    Reports which invite code, if any, the current session has verified -- as a database id, never the code itself.
 
     Parameters:
     - request (Request): the incoming request — comes from the router handler that calls this
 
     Returns:
-    - str | None: the verified code stored in request.session, or None if this session hasn't verified one yet
+    - int | None: the `code.id` recorded when this session verified, or None if it
+      has not verified one. Reads the signed session only; it does NOT look the id
+      up, so a returned id is a claim the session made at verification time, not
+      proof the code still exists. Callers that act on it (invitechat) must
+      resolve it; callers that only report state (chatroom_initialize) need not.
+
+    A legacy plaintext `verified_code` key is dropped on sight rather than
+    honoured or migrated: honouring it would keep the credential sitting in a
+    readable cookie, and migrating it would mean re-checking the code here,
+    which is the verification flow's job, not a session helper's.
     """
-    return request.session.get("verified_code")
+    request.session.pop(_LEGACY_VERIFIED_CODE_KEY, None)
+    value = request.session.get(_INVITE_CODE_ID_KEY)
+    # A signed session cannot be forged, but it can outlive a schema change;
+    # anything that is not a plain int is treated as "not verified".
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def set_verified_invite_code_id(request: Request, invite_code_id: int) -> None:
+    """
+    Records that the current session has verified an invite code, by its database id.
+
+    Parameters:
+    - request (Request): the incoming request — comes from codes_router after a successful verification
+    - invite_code_id (int): the matched `code.id` — comes from CodeService.match_code
+
+    Returns:
+    - None: writes the id into the signed session cookie
+    """
+    request.session.pop(_LEGACY_VERIFIED_CODE_KEY, None)
+    request.session[_INVITE_CODE_ID_KEY] = invite_code_id
+
+
+def clear_verified_invite_code(request: Request) -> None:
+    """
+    Removes the current session's invite-code verification.
+
+    Parameters:
+    - request (Request): the incoming request — comes from the router that found the recorded id no longer resolves
+
+    Returns:
+    - None: deletes both the id key and any legacy plaintext key from the session
+    """
+    request.session.pop(_INVITE_CODE_ID_KEY, None)
+    request.session.pop(_LEGACY_VERIFIED_CODE_KEY, None)
 
 
 def get_client_ip(request: Request) -> str:

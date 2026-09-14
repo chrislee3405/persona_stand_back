@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, Index
+from sqlalchemy import Column, Integer, String, DateTime, Index, desc
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.sql import func
 from app.database import Base
@@ -17,10 +17,10 @@ class SiteJourney(Base):
     block can exist on the timeline with no detail sheet yet (the card just
     is not clickable).
 
-    Same "newest row wins, never UPDATE" rule as site_content / site_image:
+    Same "highest id wins, never UPDATE" rule as site_content / site_image:
     to change a block's detail, INSERT a new row with the same `journey_id`;
-    reads take the newest row (highest created_at, then id) per journey_id,
-    so older versions stay as restorable history.
+    reads take the row with the highest id per journey_id, so older versions
+    stay as restorable history.
 
     Columns
     -------
@@ -29,7 +29,7 @@ class SiteJourney(Base):
                 this detail belongs to, e.g. "2024-master-ai". Not a DB
                 foreign key (the journey array is JSONB, not rows) -- the
                 writer keeps the two in sync. One logical detail per
-                journey_id; its newest row wins.
+                journey_id; its highest-id row wins.
     content     JSONB. `?` marks optional keys. Templates, not literal JSON:
 
                 {
@@ -56,7 +56,8 @@ class SiteJourney(Base):
                   ]
                 }
 
-    created_at  defaults to now(); newest row per journey_id wins.
+    created_at  defaults to now(); record metadata only -- the highest id per
+                journey_id is the current version.
 
     Served to the frontend on first paint inside GET /api/site-content as
     `journeyDetails: { "<journey_id>": <content>, ... }`.
@@ -65,13 +66,17 @@ class SiteJourney(Base):
     """
     __tablename__ = "site_journey"
     __table_args__ = (
-        # Serves the only query this table has: "newest row for this
-        # journey_id" and the DISTINCT ON form that fetches the newest row
-        # for every journey_id at once.
-        Index("ix_site_journey_journey_id_created_at", "journey_id", "created_at"),
+        # (key, id DESC): exactly the order the "current version" query reads
+        # -- one index scan, no sort. The current version is the highest id,
+        # not the newest created_at: these tables are single-owner, low-write
+        # and append-only, so id order IS write order on the application's
+        # write path, and created_at is kept as record metadata only.
+        # EXISTING DATABASES need this by hand -- create_all never adds an
+        # index to a table it did not create. See persona_stand_ec2yml/Part_C.md.
+        Index("ix_site_journey_journey_id_id_desc", "journey_id", desc("id")),
     )
 
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column(Integer, primary_key=True)
     journey_id = Column(String, nullable=False)
     content = Column(JSONB, nullable=False)
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())

@@ -1,7 +1,6 @@
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -25,7 +24,7 @@ router = APIRouter()
 
 # Shown to the visitor whenever the terms cannot be produced, whatever the
 # reason. Deliberately ONE message for three different causes -- no policy row
-# configured, the newest row's terms unusable, and the database unreachable --
+# configured, the current (highest-id) row's terms unusable, and the database unreachable --
 # because the difference is an operational detail the visitor can do nothing
 # with.
 #
@@ -35,19 +34,6 @@ router = APIRouter()
 # be collecting a consent that means nothing.
 _UNAVAILABLE_DETAIL = "Consent terms are currently unavailable. Please try again later."
 
-# The body GET /api/consent returns when the terms cannot be produced. Same
-# SHAPE as the success case, so a client never has to branch on which keys
-# exist -- only on the status code and on conditionTerms being null.
-_UNAVAILABLE_BODY = {
-    # Fails CLOSED. "We could not find out" must read as "not consented",
-    # never as consented: this flag is what the chat gate and the popup both
-    # key off, and the expensive direction to be wrong in is the permissive
-    # one.
-    "consented": False,
-    "policyVersion": None,
-    "conditionTerms": None,
-}
-
 
 class ConsentSubmission(BaseModel):
     """
@@ -55,8 +41,9 @@ class ConsentSubmission(BaseModel):
 
     `conditionText` is the policy's `condition` string, echoed back exactly --
     not a bare confirmation (see ConsentService.record_consent). The client
-    gets it from GET /api/consent's `conditionTerms.condition`. The header is
-    not echoed: it is a label for the box, not the thing being agreed to.
+    gets it from GET /api/chatroom_initialize's `consent.conditionTerms.condition`.
+    The header is not echoed: it is a label for the box, not the thing being
+    agreed to.
 
     `extra="forbid"` and a length bound, like every other body model in this
     API. This one had neither, so an arbitrarily large JSON string was read
@@ -67,65 +54,6 @@ class ConsentSubmission(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     conditionText: str = Field(..., min_length=1, max_length=8192)
-
-
-@router.get("/api/consent")
-async def get_consent_status(request: Request, service: ConsentService = Depends()):
-    """
-    Handles GET /api/consent: reports whether this session has already consented to the current policy version, plus the terms for the popup to render.
-
-    Parameters:
-    - request (Request): the incoming request — comes from FastAPI, used to read/write the session cookie
-    - service (ConsentService): checks the consent record and looks up the current policy — injected by FastAPI
-
-    Returns:
-    - dict: consented (bool), policyVersion, and conditionTerms ({header, condition}) — sent back to the client as the JSON response.
-      Three ways the last two come back null, and the status code separates
-      them into the only two groups a caller can act on:
-        200 + nulls -- the database answered and there is nothing usable to
-                       show (no consent_policy row, or a row whose terms are
-                       malformed). Nothing is broken; nothing is configured.
-        503 + nulls -- the database could not be reached at all.
-      Either way `consented` is false and the frontend shows the same
-      "terms unavailable" card with both choices inert.
-
-    NO POLICY IS EVER INVENTED HERE. app/main.py used to seed a placeholder
-    row at import time, so this endpoint could not return an empty state at
-    all -- and that placeholder silently became the live legal notice every
-    visitor agreed to, on the first boot of any new environment. The policy is
-    data now (app/models/seed/), and its absence is a real, representable
-    state rather than something the application papers over.
-
-    Not rate limited, deliberately: it is a read, it writes nothing, and the
-    frontend calls it on every chatroom mount. The POST below is the one that
-    inserts rows.
-    """
-    session_id = get_or_create_session_id(request)
-    try:
-        current = await service.get_current_terms()
-        consented = await service.is_consented(session_id)
-    except SQLAlchemyError:
-        # The database is unreachable or erroring. Without this the exception
-        # propagated as a bare 500 whose body happens to be valid JSON, so the
-        # frontend parsed it, found no terms, and landed on the right card BY
-        # ACCIDENT -- while reporting the backend as "online", because nothing
-        # had told it the check failed. An explicit 503 makes that state
-        # intentional and lets the header say "disconnected".
-        logger.exception("consent status lookup failed -- reporting terms as unavailable")
-        return JSONResponse(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            content=_UNAVAILABLE_BODY,
-        )
-
-    if current is None:
-        return dict(_UNAVAILABLE_BODY)
-
-    version, terms = current
-    return {
-        "consented": consented,
-        "policyVersion": version,
-        "conditionTerms": {"header": terms["header"], "condition": terms["condition"]},
-    }
 
 
 @router.post("/api/consent")
@@ -150,7 +78,7 @@ async def submit_consent(
     - dict: consented (always True on success) and policyVersion — sent back to the client as the JSON response
 
     REFUSES rather than records whenever there is nothing usable to agree to:
-    503 with the same message GET returns, so the popup falls back to its
+    503 with the same message GET /api/chatroom_initialize reports, so the popup falls back to its
     inert state instead of offering a button the server will keep rejecting.
     """
     # RATE LIMITED, per IP per day. This endpoint takes no credential and
@@ -198,7 +126,7 @@ async def submit_consent(
     except ConsentTextMismatchError:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Submitted consent text doesn't match the current policy. Fetch GET /api/consent for the current terms first.",
+            detail="Submitted consent text doesn't match the current policy. Fetch GET /api/chatroom_initialize for the current terms first.",
         )
     except SQLAlchemyError:
         logger.exception("recording consent failed -- reporting terms as unavailable")
@@ -210,3 +138,44 @@ async def submit_consent(
         "consented": True,
         "policyVersion": version,
     }
+
+
+@router.post("/api/consent/withdraw")
+async def withdraw_consent(request: Request, service: ConsentService = Depends()):
+    """
+    Handles POST /api/consent/withdraw: withdraws this session's consent, so nothing further it sends is processed or stored until it agrees again.
+
+    Parameters:
+    - request (Request): the incoming request — comes from FastAPI, used to read the session cookie
+    - service (ConsentService): marks the session's active consent records withdrawn — injected by FastAPI
+
+    Returns:
+    - dict: {"consented": false} — sent back to the client as the JSON response. The
+      frontend returns the visitor to the consent card, which they must explicitly
+      agree to before the conversation can continue.
+
+    Idempotent, and deliberately so: withdrawing when nothing is in force
+    returns the same answer, because "not consented" is already the state the
+    caller asked for.
+
+    Not rate limited. Unlike POST /api/consent it inserts nothing -- it only
+    stamps `withdrawn_at` on rows this session already owns -- so it cannot be
+    used to grow the database.
+
+    What this does NOT do is delete the conversation. Withdrawal stops future
+    collection; removing what was already collected is a separate request made
+    to the site owner, quoting the conversation reference shown in the
+    chatroom (see the README's "Deleting a conversation on request").
+    """
+    session_id = get_or_create_session_id(request)
+    try:
+        await service.withdraw_consent(session_id)
+    except SQLAlchemyError:
+        # Say so rather than pretending: a withdrawal that silently failed would
+        # leave the visitor believing collection had stopped when it had not.
+        logger.exception("consent withdrawal failed")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Your consent could not be withdrawn right now. Please try again in a moment.",
+        )
+    return {"consented": False}

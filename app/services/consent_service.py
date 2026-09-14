@@ -2,7 +2,8 @@ import logging
 from typing import Any, TypedDict
 
 from fastapi import Depends
-from sqlalchemy import select
+from sqlalchemy import select, update
+from sqlalchemy.sql import func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
@@ -72,7 +73,7 @@ class NoConsentPolicyConfiguredError(Exception):
     """
     Raised when there is no usable consent policy to show or record against.
 
-    Covers both "consent_policy has no rows" and "the newest row's terms are
+    Covers both "consent_policy has no rows" and "the current (highest-id) row's terms are
     unusable" (see normalise_terms) -- the two are the same fact from the
     visitor's side, and the same fact from the gate's side.
     """
@@ -106,7 +107,7 @@ class ConsentService:
       JSONB {header?, condition} -- the frontend's popup pulls it from here
       instead of hardcoding it, so wording can change without a redeploy.
       SEEDED AS DATA, not by application code: see app/models/seed/. With no
-      row at all -- or a row whose terms are unusable -- GET /api/consent
+      row at all -- or a row whose terms are unusable -- GET /api/chatroom_initialize
       reports the terms as unavailable and check() refuses every chat turn,
       which is the correct fail-closed behaviour for a consent gate and is
       now a state the app is designed to have rather than one it papers over.
@@ -168,7 +169,7 @@ class ConsentService:
 
         Returns:
         - tuple[str, ConsentTerms] | None: (version, {header, condition}), or None
-          when there is no policy row OR the newest row's terms cannot be used.
+          when there is no policy row OR the current (highest-id) row's terms cannot be used.
           The two collapse into one None deliberately: both mean "there is
           nothing a visitor could read and agree to", which is the only
           distinction the popup and the chat gate care about.
@@ -196,7 +197,7 @@ class ConsentService:
         - session_id (str): the caller's session -- comes from the router (get_or_create_session_id)
 
         Returns:
-        - bool: True if a consent_record row exists for (session_id, current policy's version); False if no usable policy is configured at all
+        - bool: True if an ACTIVE consent_record row exists for (session_id, current policy's version) -- one that has not been withdrawn; False if no usable policy is configured at all
         """
         current = await self.get_current_terms()
         if current is None:
@@ -206,6 +207,8 @@ class ConsentService:
             select(consent_models.ConsentRecord.id).where(
                 consent_models.ConsentRecord.session_id == session_id,
                 consent_models.ConsentRecord.policy_version == version,
+                # A withdrawn agreement is history, not consent.
+                consent_models.ConsentRecord.withdrawn_at.is_(None),
             ).limit(1)
         )
         return result.scalar_one_or_none() is not None
@@ -230,7 +233,7 @@ class ConsentService:
 
         Parameters:
         - session_id (str): the consenting session -- comes from the router (get_or_create_session_id)
-        - submitted_condition (str): the `condition` the client claims to be agreeing to -- comes from the router's request body (populated from GET /api/consent's conditionTerms.condition in the real popup flow). Must match the current policy's `condition` (compared with leading/trailing whitespace ignored) or the call is rejected.
+        - submitted_condition (str): the `condition` the client claims to be agreeing to -- comes from the router's request body (populated from GET /api/chatroom_initialize's consent.conditionTerms.condition in the real popup flow). Must match the current policy's `condition` (compared with leading/trailing whitespace ignored) or the call is rejected.
 
         Returns:
         - str: the policy version consented to -- goes back to the router for the response body
@@ -264,6 +267,48 @@ class ConsentService:
         await self.db.commit()
         return version
 
+    async def withdraw_consent(self, session_id: str) -> int:
+        """
+        Withdraws every agreement this session currently has in force.
+
+        Parameters:
+        - session_id (str): the withdrawing session -- comes from consent_router.withdraw_consent (get_or_create_session_id)
+
+        Returns:
+        - int: how many active records were withdrawn -- goes back to the router. 0 is not
+          an error: withdrawing when nothing is in force is simply already the case, and
+          the endpoint stays idempotent.
+
+        MARKED, NOT DELETED. Each active row gets `withdrawn_at` set and stays
+        in the table. The agreement was really given, and whatever was
+        collected while it was in force was collected under it -- deleting the
+        row would destroy the only proof of that. The same row now also proves
+        when consent ended.
+
+        From the moment this commits, ConsentService.check refuses the
+        session's chat turns with 403, so nothing further is processed or
+        stored until it agrees again -- which inserts a NEW row (see the
+        partial unique index on ConsentRecord), leaving this withdrawal on
+        record rather than overwriting it.
+
+        Every policy version is withdrawn, not only the current one: a session
+        holding an older agreement has nothing in force under the current
+        policy anyway, and leaving stale rows active would let a policy
+        rollback quietly revive them.
+        """
+        result = await self.db.execute(
+            update(consent_models.ConsentRecord)
+            .where(
+                consent_models.ConsentRecord.session_id == session_id,
+                consent_models.ConsentRecord.withdrawn_at.is_(None),
+            )
+            .values(withdrawn_at=func.now())
+        )
+        await self.db.commit()
+        withdrawn = result.rowcount or 0
+        logger.info("session=%s withdrew consent (%d active record(s))", session_id, withdrawn)
+        return withdrawn
+
     async def transfer_records(self, old_session_id: str, new_session_id: str) -> int:
         """
         Re-points every consent record held by one session id at another.
@@ -282,8 +327,10 @@ class ConsentService:
         next message would be refused with 403 and the popup would reappear
         on a session that had already agreed.
 
-        The (session_id, policy_version) uniqueness cannot collide here: the
-        new id is a freshly generated UUID that has never been seen before.
+        Withdrawn records move too, so the new id carries the session's full
+        consent history, not just what is in force. The partial unique index
+        on active (session_id, policy_version) cannot collide here: the new id
+        is a freshly generated UUID that has never been seen before.
         """
         result = await self.db.execute(
             select(consent_models.ConsentRecord).where(

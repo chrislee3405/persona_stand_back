@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, UniqueConstraint
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Index, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.sql import func
 from app.database import Base
@@ -32,7 +32,7 @@ class ConsentPolicy(Base):
     """
     __tablename__ = "consent_policy"
 
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column(Integer, primary_key=True)
     version = Column(String, nullable=False, unique=True)
     condition_text = Column(JSONB, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
@@ -41,13 +41,29 @@ class ConsentPolicy(Base):
 class ConsentRecord(Base):
     __tablename__ = "consent_record"
     __table_args__ = (
-        # A session can end up consenting again after the current policy
-        # version changes (see ConsentService.get_current_policy) -- one
-        # row per (session, version) rather than one row per session overall.
-        UniqueConstraint("session_id", "policy_version", name="uq_session_policy_version"),
+        # At most ONE ACTIVE agreement per (session, policy version) -- a
+        # PARTIAL unique index, not a plain unique constraint.
+        #
+        # A session can agree, withdraw, and agree again (see
+        # ConsentService.withdraw_consent). With a plain (session_id,
+        # policy_version) constraint the second agreement could only UPDATE
+        # the first row, overwriting the fact that consent was ever withdrawn
+        # -- and a withdrawal is exactly the kind of event that needs to stay
+        # provable. So a withdrawn row keeps its `withdrawn_at` and a new
+        # agreement is a NEW row; the index only forbids two live rows at once.
+        #
+        # EXISTING DATABASES need this by hand: create_all never alters a
+        # table it did not create. See persona_stand_ec2yml/Part_C.md.
+        Index(
+            "uq_consent_record_active",
+            "session_id",
+            "policy_version",
+            unique=True,
+            postgresql_where=text("withdrawn_at IS NULL"),
+        ),
     )
 
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column(Integer, primary_key=True)
     session_id = Column(String, nullable=False, index=True)
     policy_version = Column(String, ForeignKey("consent_policy.version"), nullable=False)
     # The {header, condition} terms the client submitted (validated to match
@@ -57,3 +73,9 @@ class ConsentRecord(Base):
     # consent_policy row it points at is ever edited afterward.
     condition_text = Column(JSONB, nullable=False)
     consented_at = Column(DateTime(timezone=True), server_default=func.now())
+    # Set when the session withdraws this agreement ("Disagree with consent"
+    # under the chatroom). NULL means the agreement is in force. The row is
+    # never deleted: that consent was given, and messages collected under it
+    # were collected lawfully, so the record of it -- and of its withdrawal --
+    # outlives the withdrawal itself.
+    withdrawn_at = Column(DateTime(timezone=True), nullable=True)

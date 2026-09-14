@@ -18,7 +18,7 @@ from app.services.rate_control_service import (
     TooManyPendingMessagesError,
     TooManyPendingMessagesFromIpError,
 )
-from app.routers import codes_router, conversations_router, consent_router, site_content_router
+from app.routers import chatroom_router, codes_router, conversations_router, consent_router, site_content_router
 from app.database import engine, Base
 from app.models.consent import ConsentPolicy  # noqa: F401  -- registers table for create_all
 from app.models.rate_limit import RateLimitCounter  # noqa: F401  -- registers table for create_all
@@ -106,8 +106,15 @@ _ERROR_STATUS_DETAIL: list[tuple[type[Exception] | tuple[type[Exception], ...], 
     (
         (ConversationNotFoundError, ConversationAccessDeniedError),
         404,
-        # Same response for both -- a caller must not be able to tell an
-        # id that does not exist from one owned by somebody else.
+        # A BACKSTOP, not a live path -- and knowingly so. No current route
+        # lets these escape: ChatService catches both and starts a fresh
+        # conversation (logging a warning so a frontend that stops adopting the
+        # returned conversationId is visible), and codes_router maps
+        # ConversationAccessDeniedError to its own 403. The entry stays for
+        # whatever route is written next and forgets to catch them, because the
+        # property it enforces is a security one: the same response for both,
+        # so a caller cannot tell an id that does not exist from one owned by
+        # somebody else.
         "conversationId not found",
     ),
     (
@@ -167,6 +174,7 @@ def _register_error_handlers(application: FastAPI) -> None:
 
 _register_error_handlers(app)
 
+app.include_router(chatroom_router.router, tags=["chatroom"])
 app.include_router(conversations_router.router, tags=["conversations"])
 app.include_router(codes_router.router, tags=["codes"])
 app.include_router(consent_router.router, tags=["consent"])

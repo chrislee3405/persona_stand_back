@@ -6,7 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.dependencies.session import get_client_ip, get_or_create_session_id
+from app.dependencies.session import get_client_ip, get_or_create_session_id, set_verified_invite_code_id
 from app.services.code_service import CodeService, InvalidCodeError
 from app.services.consent_service import ConsentService
 from app.services.conversation_manage_service import (
@@ -68,7 +68,7 @@ async def verify_code(
     - rate_control (RateControlService): enforces the brute-force ceilings — injected by FastAPI as the shared singleton
 
     Returns:
-    - dict: status and verifiedCode (the matched code) — sent back to the client as the JSON response
+    - dict: {"status": "success"} — sent back to the client as the JSON response. The code itself is deliberately not echoed.
     """
     session_id = get_or_create_session_id(request)
     client_ip = get_client_ip(request)
@@ -93,7 +93,7 @@ async def verify_code(
         )
 
     try:
-        processed_result = await service.match_code(
+        matched = await service.match_code(
             input_code=payload.inputCode,
             conversation_id=payload.conversationId,
             session_id=session_id
@@ -153,18 +153,20 @@ async def verify_code(
     # This is the actual authorization event. Every /api/invitechat call
     # from here on derives its verified status from this session cookie —
     # the client never needs to (and no longer does) send the code again.
-    request.session["verified_code"] = processed_result
+    # The session records the code's database id, never the code: the cookie
+    # is signed but readable, so the plaintext code used to be recoverable
+    # from it with a base64 decode (see set_verified_invite_code_id).
+    set_verified_invite_code_id(request, matched.id)
 
     logger.info(
         "invite code verified: rotated session id, moved %d conversation(s) and %d consent record(s)",
         moved_conversations, moved_consents,
     )
 
-    # `received` (an echo of the submitted code) and `returned_result` (the
-    # internal variable name in CodeService) are both gone. Neither was read
-    # by the client, and an authentication endpoint should not be echoing the
-    # credential it was handed back at whoever sent it.
+    # No echo of the code in any form. `received`, `returned_result` and then
+    # `verifiedCode` each handed the credential back to whoever sent it; the
+    # client already knows what it typed, and a second tab learns only that
+    # the session IS verified (GET /api/chatroom_initialize), never with what.
     return {
         "status": "success",
-        "verifiedCode": processed_result
     }

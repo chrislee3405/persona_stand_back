@@ -6,7 +6,7 @@ from app.constants import SUMMARY_MODEL
 from app.database import SessionLocal
 from app.services.conversation_manage_service import ConversationService
 from app.services.ai.gemini_service import GeminiService
-from app.services.model_collarborate.prepare_history import prepare_history
+from app.services.model_collaborate.prepare_history import prepare_history
 
 logger = logging.getLogger(__name__)
 

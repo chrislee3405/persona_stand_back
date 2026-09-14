@@ -131,6 +131,22 @@ def _compute_idf(df_dict: dict[str, int], ndocs: int, epsilon: float = 0.25) -> 
 
     Returns:
     - dict[str, float]: term to IDF weight — goes to _bm25_score via find_similar_questions
+
+    THE SMALL-CORPUS FLOOR. Normally a non-positive IDF is floored to
+    `epsilon x average positive IDF`. That average does not exist when NO term
+    has a positive IDF -- and with fewer than three documents that is always
+    the case: one document gives every term log(1/((1.5)/(0.5))) = -1.10, and
+    two give a term in one of them log(1/1.0) = 0.0, which is not > 0 either.
+    The average then came out as 0, the floor as 0, every IDF as 0, every
+    score as 0, and find_similar_questions -- whose floor is exclusive -- threw
+    every candidate away. Retrieval silently returned nothing, so the persona
+    answered without the stored example it should have had.
+
+    With no positive IDF to average, the floor is `epsilon` itself. Every term
+    then carries the same small weight, so ranking falls back to plain term
+    overlap -- a question sharing more words with the message still scores
+    higher -- which is the only meaningful signal a one- or two-document
+    corpus has. A corpus of three or more documents is unaffected.
     """
     raw_idf = {}
     for term, n_i in df_dict.items():
@@ -138,8 +154,17 @@ def _compute_idf(df_dict: dict[str, int], ndocs: int, epsilon: float = 0.25) -> 
         raw_idf[term] = math.log(1 / left_denominator)
 
     positive_values = [v for v in raw_idf.values() if v > 0]
-    avg_idf = sum(positive_values) / len(positive_values) if positive_values else 0.0
-    floor = epsilon * avg_idf
+    if positive_values:
+        floor = epsilon * (sum(positive_values) / len(positive_values))
+    else:
+        floor = epsilon
+        if raw_idf:
+            logger.warning(
+                "BM25 corpus has %d document(s) and no term with a positive IDF -- "
+                "falling back to a flat IDF of %.2f so retrieval still ranks by term overlap. "
+                "Add question_bank rows (3 or more) for real IDF weighting.",
+                ndocs, epsilon,
+            )
 
     return {term: (v if v > 0 else floor) for term, v in raw_idf.items()}
 
@@ -295,7 +320,7 @@ class BM25Service:
         nothing to notice from the outside.
 
         One indexed `SELECT id ... LIMIT 1` per turn buys the fix. That is
-        nothing beside the 6-11 Gemini calls the same turn makes, and it
+        nothing beside the 4-12 Gemini calls the same turn makes, and it
         catches BOTH ways the corpus can change: the row being deleted (the
         owner forcing a rebuild) and the row being replaced (a newer corpus
         computed by another worker).
@@ -356,20 +381,19 @@ class BM25Service:
         logger.debug("Loaded BM25 corpus from corpus_cache id=%d.", row.id)
         return BM25Service._corpus_cache
 
-    async def find_similar_questions(self, user_message: str, top_k: int = 3, min_score: float = 0.0) -> list[dict]:
+    async def find_similar_questions(self, user_message: str, top_k: int = 3) -> list[dict]:
         """
         Ranks question_bank rows by BM25 score against a user message and returns the top matches.
 
         Parameters:
         - user_message (str): the text to match against — comes from the caller (e.g. ModelCollaborateService)
         - top_k (int): maximum number of results to return — defaults to 3
-        - min_score (float): exclusive floor; a result must score STRICTLY ABOVE this to be returned — defaults to 0.0, i.e. "some term overlap or nothing"
 
         Returns:
-        - list[dict]: up to top_k matches as {question, answer, score}, all with score > min_score — goes to the caller (e.g. ContextGatherer.gather)
+        - list[dict]: up to top_k matches as {question, answer, score}, all with score > 0 — goes to the caller (e.g. ContextGatherer.gather)
 
-        The floor is exclusive, not inclusive. It used to be `score < min_score`
-        with min_score 0.0, so a document scoring exactly 0.0 -- meaning it
+        A result must score STRICTLY ABOVE zero, i.e. "some term overlap or
+        nothing". It used to be `score < 0.0`, so a document scoring exactly 0.0 -- meaning it
         shares NO stemmed term with the message, the definition of an
         irrelevant hit -- was still returned as a candidate. ContextGatherer
         then spent a Gemini call asking the model to re-rank rows that could
@@ -406,7 +430,7 @@ class BM25Service:
         for doc, score in scored[:top_k]:
             # Exclusive: a zero score means no shared terms at all. `scored` is
             # sorted descending, so the first failure ends the run.
-            if score <= min_score:
+            if score <= 0.0:
                 break
             results.append({
                 "question": doc["question"],

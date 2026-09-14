@@ -673,7 +673,7 @@ def validate_consent_terms(version: str, condition_text: Any) -> None:
     Checked at the write side for a sharper reason than the site copy is. A
     malformed `site_content` row makes a section render wrong; a malformed
     consent policy makes the gate UNAVAILABLE -- ConsentService.normalise_terms
-    returns None for it, GET /api/consent reports the terms as unavailable,
+    returns None for it, GET /api/chatroom_initialize reports the terms as unavailable,
     and every chat turn is refused with 403. The app degrades correctly, which
     means nothing crashes and nothing obviously breaks: the chat simply stops
     working, sitewide, until somebody reads a log line. Catching the shape

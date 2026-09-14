@@ -5,7 +5,7 @@ from app.database import Base
 class QuestionBank(Base):
     __tablename__ = "question_bank"
 
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column(Integer, primary_key=True)
     question = Column(Text, nullable=False)
     answer = Column(Text, nullable=False)
 
@@ -13,7 +13,7 @@ class QuestionBank(Base):
 class DocReference(Base):
     __tablename__ = "doc_reference"
 
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column(Integer, primary_key=True)
     document_topic = Column(String, nullable=False, unique=True)
     topic_description = Column(Text, nullable=False, unique=True)
     content = Column(Text, nullable=False)
@@ -22,7 +22,7 @@ class DocReference(Base):
 class PersonalityReference(Base):
     __tablename__ = "personality_reference"
 
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column(Integer, primary_key=True)
     legal_name = Column(Text, nullable=False)
     prefer_name = Column(Text, nullable=False)
     culture_background = Column(Text, nullable=False)
@@ -32,7 +32,7 @@ class PersonalityReference(Base):
 class ScenarioReference(Base):
     __tablename__ = "scenario_reference"
 
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column(Integer, primary_key=True)
     scenario_topic = Column(String, nullable=False, unique=True)
     topic_description = Column(Text, nullable=False, unique=True)
     content = Column(Text, nullable=False)

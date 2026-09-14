@@ -20,10 +20,9 @@ docker compose exec backend python -m app.models.seed.load
 Two reasons, one of which used to be a bug.
 
 **A local database to develop against.** `docker-compose.yml` now runs its own
-Postgres, so a fresh clone comes up with a site that renders and a chat that
-answers. Before this, the documented local loop tunnelled to the production
-RDS instance — so every local run wrote to production, and there was nowhere
-safe to run a test.
+Postgres, so local development never touches production. Before this, the
+documented local loop tunnelled to the production RDS instance — so every
+local run wrote to production, and there was nowhere safe to run a test.
 
 **Seeding is data, not application code.** `app/main.py` used to insert a
 consent policy at import time, with a comment on the row calling its own
@@ -39,17 +38,19 @@ quietly inventing terms.
 **This repository is public.** The seed files carry the site owner's real
 content — CV, academic transcript, residency status, contact details and the
 persona's profile — so `.gitignore` keeps every `*.json` here out of git
-except two:
+except one:
 
 | Committed | Why it is safe |
 |---|---|
 | `consent_policy.json` | the consent notice, which is public text shown to every visitor |
-| `invite_code.json` | `LOCAL-DEV-CODE`, a local-only code (see the warning below) |
 
-Everything else lives only on your machine. A fresh clone therefore seeds just
-the consent policy and the dev invite code — the loader skips any file that is
-absent — and renders the site's empty states. To get real content onto a new
-machine, export it from a database that already has it:
+Everything else lives only on your machine, `invite_code.json` included — a
+working invite code has no business in a public repository, even a local one.
+A fresh clone therefore seeds just the consent policy — the loader skips any
+file that is absent — and renders the site's empty states; the chat has no
+persona profile to answer from until the reference files are loaded. To get
+real content onto a new machine, export it from a database that already has
+it:
 
 ```bash
 # writes one JSON dump per table into audit/db/ (also gitignored)
@@ -60,10 +61,21 @@ and convert those dumps into this directory's shapes (map-shaped `site_content`
 / `site_journey` / `site_project`, `id` and `created_at` dropped). Never copy
 them anywhere that is not gitignored.
 
-⚠️ **`invite_code.json` must never reach a deployed database.** `LOCAL-DEV-CODE`
-is in a public repository, so seeding it into RDS would publish a working
-invite code — invite tier, exempt from the per-IP limit — to anyone who reads
-this file. Real codes are issued per company; generate one with
+### A local invite code
+
+To test the invite tier locally, create `invite_code.json` yourself (it stays
+gitignored) and re-run the loader:
+
+```json
+[{ "code": "LOCAL-DEV-CODE", "description": "local development only" }]
+```
+
+or insert one directly: `INSERT INTO code (code, description) VALUES ('LOCAL-DEV-CODE', 'local development only');`
+
+⚠️ **A local code must never reach a deployed database.** Anything written in
+this README is public, so a code like the one above seeded into RDS would be a
+working invite code — invite tier, exempt from the per-IP limit — for anyone
+who reads it. Real codes are issued per company; generate one with
 `python -c "import secrets; print(secrets.token_urlsafe(12))"`.
 
 ### The consent policy
@@ -82,7 +94,7 @@ column became JSONB — `ConsentService.normalise_terms` reads it as
 `{"header": "", "condition": <the old text>}`.
 
 Terms that cannot be read produce **no** consent gate rather than a broken
-one: `GET /api/consent` reports them unavailable, the popup shows its inert
+one: `GET /api/chatroom_initialize` reports them unavailable, the popup shows its inert
 card with both choices dead, and every chat turn is refused with 403. That is
 the correct fail-closed behaviour, but it is also silent — nothing crashes —
 so `validate_consent_terms` checks the shape at seed time to keep a typo from
@@ -127,7 +139,7 @@ python -m app.validators.content_validator --section journey journey-only.json
 | `question_bank.json` | `question_bank` | skipped if the table has any rows |
 
 The `site_*` tables are append-only by design — "to change a section, INSERT a
-new row with the same slug; reads take the newest" — so re-running the loader
+new row with the same slug; reads take the highest id" — so re-running the loader
 against a database that already has content would stack a second, identical
 version on top of every section. Hence "skipped if the table has any rows"
 rather than an upsert. To reload them, delete the rows first.
@@ -139,10 +151,11 @@ every BM25 document frequency.
 ## A note on `question_bank` size
 
 Keep at least **three** rows. BM25's IDF floors any term that appears in most
-of the corpus, and with one or two documents *every* term qualifies, so every
-score comes out as 0 and retrieval silently returns nothing —
-`similar_examples` stays empty and the persona answers without the stored
-example it should have had. Eight rows are seeded here for that reason.
+of the corpus, and with one or two documents *every* term qualifies. Retrieval
+still works on a corpus that small — with no positive IDF to scale from,
+`_compute_idf` falls back to a flat weight and logs a warning, so ranking
+reduces to plain word overlap — but real IDF weighting, where a rare word
+counts for more than a common one, needs three or more documents.
 
 ## After changing `question_bank`
 

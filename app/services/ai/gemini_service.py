@@ -5,15 +5,12 @@ from typing import Union
 from google import genai
 from google.genai import types
 
-# Per-call wall-clock ceiling, milliseconds. Without it a hung Vertex
-# connection stalls a chat turn indefinitely: nothing else in the pipeline
-# sets a deadline, and a turn makes 6-11 of these calls in sequence, so one
-# stuck call holds the visitor's request open until the reverse proxy gives
-# up on it. 30s is generous against the ~10s a real turn's slowest call
-# takes, while keeping the worst case (a turn that exhausts its
-# regeneration budget) inside nginx's proxy_read_timeout -- which is why
-# that timeout is now set explicitly in persona_stand_front/nginx.conf
-# rather than left at its 60s default. Keep the two in step.
+# Per-call wall-clock ceiling, milliseconds. Bounds ONE hung Vertex
+# connection; 30s is generous against the ~10s a real turn's slowest call
+# takes. It does NOT bound a whole turn: a turn makes 4-12 of these calls in
+# sequence, so the per-call ceiling alone allows ~360s. The whole turn is
+# bounded by TURN_DEADLINE_SECONDS (app/constants.py), which is the value
+# that has to stay under nginx's proxy_read_timeout -- not this one.
 _REQUEST_TIMEOUT_MS = 30_000
 
 # Hard ceiling on generated length, in tokens, applied to every call. This
@@ -122,7 +119,7 @@ class GeminiService:
     (`_client.aio`). They were synchronous, called without any threadpool
     offload from `async def` request handlers -- which meant the blocking
     HTTPS request ran ON the event loop. For the whole duration of a chat
-    turn (6-11 sequential calls) the single uvicorn worker could serve
+    turn (up to 12 sequential calls) the single uvicorn worker could serve
     nothing else, including GET /api/site-content, the public portfolio's
     only data source. Every caller in the reply pipeline is already async,
     so awaiting here costs nothing structurally.
@@ -158,7 +155,7 @@ class GeminiService:
         Sends a prompt to a Gemini model and parses its response as JSON matching the given schema.
 
         Parameters:
-        - model_name (str): which Gemini model to call — comes from the caller (e.g. ModelCollaborateService.find_topic)
+        - model_name (str): which Gemini model to call — comes from the caller (e.g. ContextGatherer._select_relevant_topics, GroundingService.ground)
         - user_prompt (str): the prompt content — comes from the caller
         - system_prompt (str): system instruction — comes from the caller
         - schema (dict): the expected response JSON schema — comes from the caller

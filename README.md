@@ -5,7 +5,7 @@ site-content API.
 
 Full setup tutorial: https://github.com/chrislee3405/persona_stand_ec2yml
 
-Current version 0.6.3
+Current version 0.6.4
 
 ---
 
@@ -40,6 +40,10 @@ GCP_PROJECT_ID=<your-gcp-project-id>
 # Windows:     C:/Users/<you>/AppData/Roaming/gcloud/application_default_credentials.json
 # Deployment uses Workload Identity Federation instead and needs no key file.
 GOOGLE_ADC_PATH=~/.config/gcloud/application_default_credentials.json
+# docker-compose.yml mounts that file read-only at /app/adc.json. This line is
+# what tells the Google client to read it there -- without it the mount does
+# nothing and every chat turn fails to authenticate.
+GOOGLE_APPLICATION_CREDENTIALS=/app/adc.json
 
 # --- Environment ---------------------------------------------------------
 # Leave unset locally. See the warning under "ENV" below before setting it
@@ -75,17 +79,17 @@ docker compose exec backend python -m app.models.seed.load
 
 The real content seed files are **gitignored** — this repository is public and
 they hold the owner's CV, transcript and contact details. A fresh clone seeds
-only the consent policy and the local dev invite code; see
+only the consent policy; see
 [`app/models/seed/README.md`](app/models/seed/README.md) for how to bring real
-content onto a new machine, and why `invite_code.json` must never reach a
-deployed database. To check the seed files without writing anything:
+content onto a new machine, and how to add a local invite code (which must
+never reach a deployed database). To check the seed files without writing
+anything:
 
 ```bash
 docker compose exec backend python -m app.models.seed.load --dry-run
 ```
 
 The site is then at http://localhost and the API at http://localhost:8000.
-The local invite code is `LOCAL-DEV-CODE`.
 
 ---
 
@@ -140,9 +144,9 @@ Notes:
 Useful queries once connected:
 
 ```sql
--- what the site is currently serving (newest row per section)
-SELECT DISTINCT ON (section) section, created_at
-FROM site_content ORDER BY section, created_at DESC, id DESC;
+-- what the site is currently serving (highest id per section)
+SELECT DISTINCT ON (section) section, id, created_at
+FROM site_content ORDER BY section, id DESC;
 
 -- today's rate-limit counters, busiest first
 SELECT key, count FROM rate_limit_counter
@@ -154,6 +158,43 @@ SELECT created_at, text FROM message WHERE sender = 'error' ORDER BY created_at 
 -- force a BM25 rebuild after editing question_bank
 DELETE FROM corpus_cache;
 ```
+
+---
+
+## Deleting a conversation on request
+
+There is no self-service deletion. Under the chat window each visitor sees a
+**conversation reference** — the conversation's id, which is random and says
+nothing about who they are — and the consent notice tells them to contact the
+site owner to have something removed. When a request quotes a reference:
+
+```sql
+-- 1. confirm it exists, and see what will go
+SELECT conversation_id, created_at, code,
+       (SELECT count(*) FROM message m WHERE m.conversation_id = c.conversation_id) AS messages
+FROM conversation c
+WHERE conversation_id = '<reference>';
+
+-- 2. delete it -- messages first, they reference the conversation
+BEGIN;
+DELETE FROM message      WHERE conversation_id = '<reference>';
+DELETE FROM conversation WHERE conversation_id = '<reference>';
+COMMIT;
+```
+
+Paste the reference exactly — it is a full UUID, and matching on a prefix
+could delete someone else's conversation.
+
+What this does **not** remove, deliberately:
+
+- **`consent_record`** — proof that consent was given (and, if they used
+  "Disagree with consent", when it was withdrawn). It is keyed to a random
+  session id, not to the conversation, and holds no message content.
+- **`rate_limit_counter`** — daily counts keyed by session id or IP, with no
+  content; swept automatically after `RATE_LIMIT_RETENTION_DAYS`.
+
+Withdrawing consent in the chatroom stops further collection but does not
+delete anything already stored; deletion is always this manual step.
 
 ---
 
