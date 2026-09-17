@@ -2,6 +2,8 @@
 
 Automated tests and CI instructions: [TESTING.md](TESTING.md).
 
+Every branch push runs independent backend tests, then publishes a commit-specific GHCR image if they pass. Pull requests test without publishing. `persona_stand_ec2yml` selects frontend/backend digests and runs the combined browser suite. Minor updates stay in GHCR; approved major releases copy the tested images unchanged into ECR for EC2 deployment. No AWS publishing role is needed in this repository.
+
 FastAPI + SQLAlchemy (async) + PostgreSQL. The chat pipeline and the
 site-content API.
 

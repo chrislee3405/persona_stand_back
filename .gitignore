@@ -48,3 +48,7 @@ audit/
 # stays ignored too: a working invite code does not belong in a public repo.
 app/models/seed/*.json
 !app/models/seed/consent_policy.json
+
+# CI image receipt and Python publication checks
+image.json
+__pycache__/

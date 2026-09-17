@@ -44,3 +44,8 @@ pytest-cache-files-*/
 requirements-dev.txt
 pytest.ini
 TESTING.md
+
+image.json
+scripts/publish_image.py
+scripts/test_publish_image.py
+**/__pycache__

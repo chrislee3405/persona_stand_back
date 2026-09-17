@@ -59,10 +59,11 @@ Unit tests do not connect to PostgreSQL.
 
 Pull requests and pushes to every branch run pytest on a fresh runner with a
 temporary PostgreSQL service. A JUnit report is saved even when tests fail.
-ECR publishing runs only for `main`/`trial` pushes, after the tests pass. Images carry
-their source commit as a tag and OCI revision label so `ec2yml` can verify a pair.
-Publishing an image is not deployment approval. Existing AWS repository variables
-are needed for publishing; tests need no AWS or Google secrets.
+Every branch push, including dev, publishes a commit-specific GHCR image after tests pass. PR events do not publish. `scripts/publish_image.py` reuses existing commit images on reruns, verifies source/revision labels and emits an `image.json` digest/SHA record. Keep these tags and images; new contents require a new commit.
+
+Publication uses automatic GITHUB_TOKEN packages-write permission, with no AWS/Google secrets. Grant ec2yml Actions read access in the GHCR package settings. Private source checkout still needs its read-only BACKEND_READ_TOKEN.
+
+Ec2yml tests exact frontend/backend GHCR digests through one combined workflow for minor and major changes. Minor builds remain in GHCR. Approved major releases copy tested images unchanged to ECR; EC2 pulls only promoted ECR digests. See ec2yml Part A.6 for setup/cleanup and Part C for deployment.
 
 ## Combined browser-test interface
 
