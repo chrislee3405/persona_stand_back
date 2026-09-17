@@ -17,7 +17,7 @@ class SiteJourney(Base):
     block can exist on the timeline with no detail sheet yet (the card just
     is not clickable).
 
-    Same "highest id wins, never UPDATE" rule as site_content / site_image:
+    Same "highest id wins, never UPDATE" rule as site_content / site_media:
     to change a block's detail, INSERT a new row with the same `journey_id`;
     reads take the row with the highest id per journey_id, so older versions
     stay as restorable history.

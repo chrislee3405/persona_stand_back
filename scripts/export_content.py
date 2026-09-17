@@ -5,7 +5,7 @@ engine = create_engine(os.environ["DATABASE_URL"])
 
 TABLES = {
     "site_content":   "section, created_at",
-    "site_image":     "section, description, created_at",
+    "site_media":     "section, description, created_at",
     "site_project":   "project_id, created_at",
     "site_journey":   "journey_id, created_at",
     "consent_policy": "id",

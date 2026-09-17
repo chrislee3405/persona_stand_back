@@ -1,5 +1,6 @@
 import os
 import json
+from functools import lru_cache
 from typing import Union
 
 from google import genai
@@ -30,12 +31,20 @@ _MAX_OUTPUT_TOKENS = 2048
 # differently. Replaces the old `vertexai.init(...)` call -- see
 # https://docs.cloud.google.com/vertex-ai/generative-ai/docs/deprecations/genai-vertexai-sdk
 # (vertexai.generative_models is deprecated, removed June 24, 2026).
-_client = genai.Client(
-    vertexai=True,
-    project=os.getenv("GCP_PROJECT_ID"),
-    location="global",
-    http_options=types.HttpOptions(timeout=_REQUEST_TIMEOUT_MS),
-)
+@lru_cache(maxsize=1)
+def _get_client():
+    """Create credentials and transport only when a real model call is made.
+
+    FastAPI can then override GeminiService for isolated tests without needing
+    Google credentials merely to import the application. Production still
+    creates and reuses exactly one Vertex client.
+    """
+    return genai.Client(
+        vertexai=True,
+        project=os.getenv("GCP_PROJECT_ID"),
+        location="global",
+        http_options=types.HttpOptions(timeout=_REQUEST_TIMEOUT_MS),
+    )
 
 # Whatever json.loads() can produce -- which is exactly what
 # call_model_structured returns, since it's a direct pass-through of the
@@ -116,7 +125,7 @@ class GeminiService:
     returns whatever Gemini responds with.
 
     BOTH METHODS ARE ASYNC, and use the SDK's async surface
-    (`_client.aio`). They were synchronous, called without any threadpool
+    (`_get_client().aio`). They were synchronous, called without any threadpool
     offload from `async def` request handlers -- which meant the blocking
     HTTPS request ran ON the event loop. For the whole duration of a chat
     turn (up to 12 sequential calls) the single uvicorn worker could serve
@@ -140,7 +149,7 @@ class GeminiService:
         Raises:
         - GeminiEmptyResponseError: the model returned no text at all (safety block, truncation). Never returns None despite the SDK being able to.
         """
-        response = await _client.aio.models.generate_content(
+        response = await _get_client().aio.models.generate_content(
             model=model_name,
             contents=user_prompt,
             config=types.GenerateContentConfig(
@@ -167,7 +176,7 @@ class GeminiService:
         - GeminiEmptyResponseError: the model returned no text at all, so there is nothing to parse.
         - json.JSONDecodeError: the model returned text that is not valid JSON (a truncated payload does this). Callers that can degrade already catch broadly; see GroundingService.ground.
         """
-        response = await _client.aio.models.generate_content(
+        response = await _get_client().aio.models.generate_content(
             model=model_name,
             contents=user_prompt,
             config=types.GenerateContentConfig(

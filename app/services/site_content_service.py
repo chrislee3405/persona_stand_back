@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.models.site_content import SiteContent
-from app.models.site_image import SiteImage
+from app.models.site_media import SiteMedia
 from app.models.site_journey import SiteJourney
 from app.models.site_project import SiteProject
 
@@ -36,9 +36,9 @@ class SiteContentService:
     app/validators/content_validator.py, which every seeding and content
     update path runs the JSON through before it reaches the database.
 
-    Images are kept out of `content` entirely -- they live in the
-    `site_image` table (app/models/site_image.py), one row per version of
-    each (section, description) image slot, and get_all_images() reads them
+    Media keys are kept out of `content` entirely -- they live in the
+    `site_media` table (app/models/site_media.py), one row per version of
+    each (section, description) media slot, and get_all_media() reads them
     with the same "highest id wins" rule. The Journey click-through detail
     sheets live in `site_journey` (app/models/site_journey.py), read by
     get_all_journey_details() the same way.
@@ -76,29 +76,29 @@ class SiteContentService:
         )
         return {row.section: row.content for row in result.scalars().all()}
 
-    async def get_all_images(self) -> dict[str, list[dict[str, str]]]:
+    async def get_all_media(self) -> dict[str, list[dict[str, str]]]:
         """
-        Fetches the current image for every (section, description) slot, grouped by section -- the picture side of what the main page loads on first paint.
+        Fetches the current asset for every (section, description) slot, grouped by section, including images, videos, posters and PDFs.
 
         Parameters:
         - none
 
         Returns:
-        - dict[str, list[dict[str, str]]]: section slug -> list of {"description": ..., "path": ...} (the S3 object key), one entry per distinct (section, description) slot (its highest-id row). Empty dict if site_image has no rows. Uses Postgres DISTINCT ON (section, description) with a matching ORDER BY so exactly the highest-id row per slot comes back.
+        - dict[str, list[dict[str, str]]]: section slug -> list of {"description": ..., "path": ...} (the S3 object key), one entry per distinct (section, description) slot (its highest-id row). Empty dict if site_media has no rows. Uses Postgres DISTINCT ON (section, description) with a matching ORDER BY so exactly the highest-id row per slot comes back.
         """
         result = await self.db.execute(
-            select(SiteImage)
-            .distinct(SiteImage.section, SiteImage.description)
+            select(SiteMedia)
+            .distinct(SiteMedia.section, SiteMedia.description)
             .order_by(
-                SiteImage.section,
-                SiteImage.description,
-                desc(SiteImage.id),
+                SiteMedia.section,
+                SiteMedia.description,
+                desc(SiteMedia.id),
             )
         )
         grouped: dict[str, list[dict[str, str]]] = {}
         for row in result.scalars().all():
             grouped.setdefault(row.section, []).append(
-                {"description": row.description, "path": row.image_path}
+                {"description": row.description, "path": row.media_path}
             )
         return grouped
 

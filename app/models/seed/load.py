@@ -57,13 +57,14 @@ from app.models.prompt_reference import (
 )
 from app.models.rate_limit import RateLimitCounter  # noqa: F401  -- registers table for create_all
 from app.models.site_content import SiteContent
-from app.models.site_image import SiteImage
+from app.models.site_media import SiteMedia
 from app.models.site_journey import SiteJourney
 from app.models.site_project import SiteProject
+from app.services.media_schema import require_media_schema
 from app.validators.content_validator import (
     ContentValidationError,
     validate_consent_terms,
-    validate_image,
+    validate_media,
     validate_journey_detail,
     validate_project_detail,
     validate_site_content,
@@ -230,9 +231,9 @@ async def _load_site_project(db: AsyncSession, dry_run: bool) -> int:
     return len(payload)
 
 
-async def _load_site_image(db: AsyncSession, dry_run: bool) -> int:
+async def _load_site_media(db: AsyncSession, dry_run: bool) -> int:
     """
-    Validates and inserts the `site_image` rows.
+    Validates and inserts the `site_media` rows.
 
     Parameters:
     - db (AsyncSession): the loader's session
@@ -241,21 +242,21 @@ async def _load_site_image(db: AsyncSession, dry_run: bool) -> int:
     Returns:
     - int: how many rows were inserted
     """
-    payload = _read("site_image.json")
+    payload = _read("site_media.json")
     if payload is None:
         return 0
     for index, row in enumerate(payload):
-        _check_columns(SiteImage, row, "site_image.json", index)
-        validate_image(row.get("section"), row.get("description"), row.get("image_path"))
-    logger.info("validated %d site_image row(s)", len(payload))
+        _check_columns(SiteMedia, row, "site_media.json", index)
+        validate_media(row.get("section"), row.get("description"), row.get("media_path"))
+    logger.info("validated %d site_media row(s)", len(payload))
 
-    if dry_run or not await _is_empty(db, SiteImage):
+    if dry_run or not await _is_empty(db, SiteMedia):
         if not dry_run:
-            logger.info("skip site_image (table already has rows)")
+            logger.info("skip site_media (table already has rows)")
         return 0
 
     for row in payload:
-        db.add(SiteImage(**row))
+        db.add(SiteMedia(**row))
     return len(payload)
 
 
@@ -385,9 +386,11 @@ async def seed(dry_run: bool = False, create_tables: bool = True) -> None:
     Returns:
     - None: commits once at the end, so a validation failure anywhere leaves the database untouched
     """
-    if create_tables and not dry_run:
+    if not dry_run:
         async with engine.begin() as connection:
-            await connection.run_sync(Base.metadata.create_all)
+            await require_media_schema(connection)
+            if create_tables:
+                await connection.run_sync(Base.metadata.create_all)
         logger.info("schema ready")
 
     async with SessionLocal() as db:
@@ -395,7 +398,7 @@ async def seed(dry_run: bool = False, create_tables: bool = True) -> None:
         total += await _load_site_content(db, dry_run)
         total += await _load_site_journey(db, dry_run)
         total += await _load_site_project(db, dry_run)
-        total += await _load_site_image(db, dry_run)
+        total += await _load_site_media(db, dry_run)
         total += await _load_consent_policy(db, dry_run)
         total += await _load_keyed(db, dry_run, file_name="invite_code.json", model=InviteCode, key_field="code")
         total += await _load_keyed(db, dry_run, file_name="doc_reference.json", model=DocReference, key_field="document_topic")

@@ -356,7 +356,7 @@ def _reject_unknown_keys(item: Any, known: set[str], path: str, problems: _Probl
     Returns:
     - None: records a problem per unknown key.
       This is the check that catches `"heading"` written as `"headding"`, or
-      `"image_path"` put on a projects row instead of a site_image row -- both
+      `"media_path"` put on a projects row instead of a site_media row -- both
       of which are invisible at read time because the frontend just sees the
       key as absent and falls back.
     """
@@ -709,19 +709,19 @@ def validate_consent_terms(version: str, condition_text: Any) -> None:
         raise ContentValidationError(f"consent_policy version {version!r}", problems.items)
 
 
-def validate_image(section: str, description: str, image_path: str) -> None:
+def validate_media(section: str, description: str, media_path: str) -> None:
     """
-    Validates one `site_image` row.
+    Validates one `site_media` row.
 
     Parameters:
     - section (str): which site_content section the image belongs to -- comes from the caller
     - description (str): the slot label within that section -- comes from the caller
-    - image_path (str): the S3 object KEY -- comes from the caller
+    - media_path (str): the S3 object KEY -- comes from the caller
 
     Returns:
     - None: raises ContentValidationError listing every problem found, or returns silently
 
-    `image_path` must be a bare object key, never a full URL: the frontend
+    `media_path` must be a bare object key, never a full URL: the frontend
     resolves it against the CDN base in assetUrl.ts, so storing a URL here
     produces a doubled `https://…cloudfront.net/https://…` src. That exact
     mistake has its own row in persona_stand_ec2yml/Part_D.md's
@@ -733,26 +733,26 @@ def validate_image(section: str, description: str, image_path: str) -> None:
     problems = _Problems()
     _require_str(section, "section", problems)
     _require_str(description, "description", problems)
-    _require_str(image_path, "image_path", problems)
+    _require_str(media_path, "media_path", problems)
 
-    if isinstance(image_path, str) and image_path.strip():
-        key = image_path.strip()
+    if isinstance(media_path, str) and media_path.strip():
+        key = media_path.strip()
         lowered = key.lower()
         if lowered.startswith(("http://", "https://", "//")):
             problems.add(
-                "image_path",
+                "media_path",
                 "must be a bare S3 object key (e.g. about_me/hero.jpg), not a full URL -- "
                 "the CDN base is prepended by assetUrl.ts",
             )
         if any(character in key for character in '"\'()\\ '):
             problems.add(
-                "image_path",
+                "media_path",
                 "must not contain quotes, parentheses, backslashes or spaces -- "
                 "the key is interpolated into a CSS url(\"...\") in Home.tsx",
             )
 
     if problems.items:
-        raise ContentValidationError(f"site_image ({section!r}, {description!r})", problems.items)
+        raise ContentValidationError(f"site_media ({section!r}, {description!r})", problems.items)
 
 
 # --- CLI ------------------------------------------------------------------

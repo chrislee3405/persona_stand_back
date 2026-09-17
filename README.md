@@ -1,11 +1,13 @@
 # persona_stand_back
 
+Automated tests and CI instructions: [TESTING.md](TESTING.md).
+
 FastAPI + SQLAlchemy (async) + PostgreSQL. The chat pipeline and the
 site-content API.
 
 Full setup tutorial: https://github.com/chrislee3405/persona_stand_ec2yml
 
-Current version 0.7.0
+Current version 0.7.1
 
 ---
 

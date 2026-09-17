@@ -18,6 +18,8 @@ __pycache__/
 .pytest_cache/
 .coverage
 htmlcov/
+test-results/
+pytest-cache-files-*/
 
 # 4. Database & Storage
 *.sqlite3

@@ -44,9 +44,9 @@ class SiteContent(Base):
       "resume": {                 ?   # the CV button beside the chat icon
         "label":   "<string>"     ?   #   its accessible name and tooltip
       },                              #   (default "Download CV"). NO key here:
-                                      #   the PDF is a site_image row --
+                                      #   the PDF is a site_media row --
                                       #   section "personal_statement",
-                                      #   description "resume", image_path =
+                                      #   description "resume", media_path =
                                       #   the PDF's S3 key. No row, no button.
                                       #   A "key" left on an older row is
                                       #   IGNORED.
@@ -106,15 +106,15 @@ class SiteContent(Base):
                                       # framing for the Qualifications & Awards
                                       #   banner (mirror layout: image on the
                                       #   RIGHT, text on the LEFT). Only shows
-                                      #   when a site_image ("qualifications",
+                                      #   when a site_media ("qualifications",
                                       #   "banner") row exists.
       "certHero": { ...same keys as "hero"... }, ?
                                       # framing for the Certifications banner
                                       #   (image LEFT, text RIGHT, like About).
-                                      #   Only shows when a site_image
+                                      #   Only shows when a site_media
                                       #   ("certifications", "banner") row exists.
       # NO image key here. Every image on the site -- the hero included --
-      # is a site_image row. The hero is section="personal_statement" with
+      # is a site_media row. The hero is section="personal_statement" with
       # TWO slots: description="hero_desk" (framed for the side-by-side
       # layout, >=900px) and "hero_mob" (the stacked one, <900px). The
       # browser fetches only the one its width matches. Either may be
@@ -191,12 +191,12 @@ class SiteContent(Base):
                                        #   `site_project` row keyed by `id`.
                                        #   Omit it and the card falls back to
                                        #   that paragraph overview.
-        "image_tag": "<string>"    ?   # names a site_image row -- section
+        "image_tag": "<string>"    ?   # names a site_media row -- section
                                        #   "projects", description == this value
                                        #   (defaults to `id`). The thumbnail URL
-                                       #   is built from THAT row's image_path.
+                                       #   is built from THAT row's media_path.
                                        #   No image path is stored in this row --
-                                       #   every image comes from site_image.
+                                       #   every image comes from site_media.
       }
       # ... more items; array order = left-to-right order in the scroller
     ]
@@ -228,13 +228,13 @@ class SiteContent(Base):
                                        #   starting "- " / "* " -> a bullet
                                        #   list ("point form"). Same renderer
                                        #   (<Prose>) as every other body field.
-        "image_tag": "<string>"    ?   # names a site_image row -- section
+        "image_tag": "<string>"    ?   # names a site_media row -- section
                                        #   "journey", description == this value.
-                                       #   That row's image_path shows on the
+                                       #   That row's media_path shows on the
                                        #   OPPOSITE side of the card. Omit, or
                                        #   leave a "<...>" placeholder, for no
                                        #   image. NOT an S3 key itself -- the key
-                                       #   lives in site_image.image_path.
+                                       #   lives in site_media.media_path.
         "image_description": "<string>", ?
                                        # ALT TEXT for that photo: what it shows,
                                        #   not what it is called ("Graduating
@@ -310,18 +310,18 @@ class SiteContent(Base):
     }
     # Header-only. The line under the name is live status
     # (online / offline / "Typing...") and is NOT content. The header
-    # avatar is a fixed CDN object, not a site_image row (see AVATAR_URL
+    # avatar is a fixed CDN object, not a site_media row (see AVATAR_URL
     # in persona_stand_front/src/pages/Chatroom.tsx).
 
     Media is NEVER stored in this table (nor in `site_journey` /
     `site_project`). EVERY image AND video the site renders -- hero, section
     banners, project thumbnails, journey block pictures, project demo clips
-    -- is a `site_image` row (app/models/site_image.py; it holds any S3
+    -- is a `site_media` row (app/models/site_media.py; it holds any S3
     object key, .mp4 included), one per version of a (section, description)
     slot. The frontend gets them alongside this content from GET
     /api/site-content ("images" key) and resolves each key against the CDN
     base. A leftover "heroImage" key on an old personal_statement row is
-    ignored; migrate it to a site_image row (Part_D.md).
+    ignored; migrate it to a site_media row (Part_D.md).
     """
     __tablename__ = "site_content"
     __table_args__ = (

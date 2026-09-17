@@ -1,5 +1,10 @@
 # Seed data
 
+Media assets now use `site_media.json`, model `SiteMedia`, and key field
+`media_path` (images, videos, posters and PDFs). Existing databases must first
+run [the table migration](../../../scripts/migrations/README.md); seeding does
+not rename existing tables or update populated site tables.
+
 The starting contents of an empty database, as JSON, plus the loader that puts
 them there.
 
@@ -130,7 +135,7 @@ python -m app.validators.content_validator --section journey journey-only.json
 | `site_content.json` | `site_content` | skipped if the table has any rows |
 | `site_journey.json` | `site_journey` | skipped if the table has any rows |
 | `site_project.json` | `site_project` | skipped if the table has any rows |
-| `site_image.json` | `site_image` | skipped if the table has any rows |
+| `site_media.json` | `site_media` | skipped if the table has any rows |
 | `consent_policy.json` | `consent_policy` | each version inserted only if that version is absent |
 | `invite_code.json` | `code` | each code inserted only if that code is absent |
 | `doc_reference.json` | `doc_reference` | each topic inserted only if that topic is absent |

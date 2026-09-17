@@ -6,6 +6,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from app.middleware import setup_middleware
+from app.services.media_schema import require_media_schema
 from app.services.chat_service import MessageTooLongError, MAX_MESSAGE_LENGTH
 from app.services.consent_service import ConsentRequiredError
 from app.services.conversation_manage_service import (
@@ -23,7 +24,7 @@ from app.database import engine, Base
 from app.models.consent import ConsentPolicy  # noqa: F401  -- registers table for create_all
 from app.models.rate_limit import RateLimitCounter  # noqa: F401  -- registers table for create_all
 from app.models.site_content import SiteContent  # noqa: F401  -- registers table for create_all
-from app.models.site_image import SiteImage  # noqa: F401  -- registers table for create_all
+from app.models.site_media import SiteMedia  # noqa: F401  -- registers table for create_all
 from app.models.site_journey import SiteJourney  # noqa: F401  -- registers table for create_all
 from app.models.site_project import SiteProject  # noqa: F401  -- registers table for create_all
 
@@ -76,6 +77,7 @@ async def lifespan(application: FastAPI):
     # every boot. Replace it with Alembic (or a one-off migration step in
     # persona_stand_ec2yml/Part_C.md) once the schema settles.
     async with engine.begin() as connection:
+        await require_media_schema(connection)
         await connection.run_sync(Base.metadata.create_all)
     logger.info("startup: schema check complete (create_all)")
 

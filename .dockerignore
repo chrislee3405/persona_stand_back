@@ -36,3 +36,11 @@ Thumbs.db
 .mypy_cache/
 .dmypy.json
 dmypy.json
+
+# Browser-test entrypoint and fakes are mounted only by the isolated test stack.
+tests/
+test-results/
+pytest-cache-files-*/
+requirements-dev.txt
+pytest.ini
+TESTING.md

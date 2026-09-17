@@ -3,12 +3,12 @@ from sqlalchemy.sql import func
 from app.database import Base
 
 
-class SiteImage(Base):
+class SiteMedia(Base):
     """
-    One row per version of an image used somewhere in the static website
-    copy. This is the image counterpart of `site_content` (app/models/
+    One row per version of a media asset used in the static website
+    copy. This is the media counterpart of `site_content` (app/models/
     site_content.py): `site_content` holds the text of each section as
-    JSONB, `site_image` holds the picture(s) that section shows.
+    JSONB, `site_media` holds image, video, poster and PDF object keys.
 
     Why a separate table instead of an "image" key inside the section JSON:
     images change on their own schedule (a new photo, a re-crop), they are
@@ -30,10 +30,10 @@ class SiteImage(Base):
                  same pair to swap the picture in that slot.
                  For section "journey" the description is the `image_tag`
                  named by a block in the journey site_content array.
-    image_path   S3 object KEY only, e.g. "about_me/main_img.png" -- never a
+    media_path   S3 object KEY only, e.g. "about_me/main_img.png" -- never a
                  full URL, never the image bytes. The frontend resolves it
                  against the CloudFront base in src/lib/assetUrl.ts.
-                 Despite the name it holds any asset key, not only pictures:
+                 It holds any asset key, not only pictures:
                  project demo clips are .mp4 keys, and the CV is a .pdf key
                  (section "personal_statement", description "resume").
     created_at   defaults to now(); record metadata only. Reads take the row
@@ -43,7 +43,7 @@ class SiteImage(Base):
 
     See also persona_stand_ec2yml/Part_D.md (D.2 seed SQL, D.5 shapes).
     """
-    __tablename__ = "site_image"
+    __tablename__ = "site_media"
     __table_args__ = (
         # (section, description, id DESC) -- the slot, then id: exactly the
         # order the "current version" query reads -- one index scan, no sort. The current version is the highest id,
@@ -52,11 +52,11 @@ class SiteImage(Base):
         # write path, and created_at is kept as record metadata only.
         # EXISTING DATABASES need this by hand -- create_all never adds an
         # index to a table it did not create. See persona_stand_ec2yml/Part_C.md.
-        Index("ix_site_image_section_description_id_desc", "section", "description", desc("id")),
+        Index("ix_site_media_section_description_id_desc", "section", "description", desc("id")),
     )
 
     id = Column(Integer, primary_key=True)
     section = Column(String, nullable=False)
     description = Column(String, nullable=False)
-    image_path = Column(String, nullable=False)
+    media_path = Column(String, nullable=False)
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())

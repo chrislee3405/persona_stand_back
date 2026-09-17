@@ -53,20 +53,20 @@ class SiteProject(Base):
                   "videos": [                  ?  # feature-demo clips, shown
                                                   #   on the right, one playing
                                                   #   at a time as you scroll
-                    { "src_tag":    "<string>",     # -> site_image row
+                    { "src_tag":    "<string>",     # -> site_media row
                                                     #    (section "projects",
                                                     #    description == this),
-                                                    #    image_path = the .mp4
+                                                    #    media_path = the .mp4
                                                     #    S3 KEY
-                      "poster_tag": "<string>",  ?  # -> site_image row, a .jpg
+                      "poster_tag": "<string>",  ?  # -> site_media row, a .jpg
                                                     #    still shown before play
                       "caption":    "<string>" }  ? # line under the clip
                   ]
                 }
 
                 NB: no asset PATH is stored here -- video + poster come from
-                site_image rows referenced by tag, same rule as everything
-                else (see app/models/site_image.py).
+                site_media rows referenced by tag, same rule as everything
+                else (see app/models/site_media.py).
 
     created_at  defaults to now(); record metadata only -- the highest id per
                 project_id is the current version.
