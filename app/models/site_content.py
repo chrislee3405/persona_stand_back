@@ -273,10 +273,9 @@ class SiteContent(Base):
                                       #   row is only needed to show something
                                       #   different there.
     }
-    # The mark itself is NOT in this row: it is a fixed CDN object
-    # (tools_icon/tab_logo.png), the same file index.html points the
-    # favicon at, so the tab icon and the header icon cannot drift apart.
-    # Replace the icon by overwriting that S3 key -- no redeploy.
+    # The mark itself is NOT in this row. It comes from the `site_media`
+    # slot section="navbar", description="tab_logo"; its `media_path` is
+    # resolved against the CDN base by the frontend.
 
     ------------------------------------------------------------------
     section = "footer"                  JSON OBJECT     Site footer

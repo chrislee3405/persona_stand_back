@@ -63,7 +63,7 @@ Every branch push, including dev, publishes a commit-specific GHCR image after t
 
 Publication uses automatic GITHUB_TOKEN packages-write permission, with no AWS/Google secrets. Grant ec2yml Actions read access in the GHCR package settings. Private source checkout still needs its read-only BACKEND_READ_TOKEN.
 
-Ec2yml tests exact frontend/backend GHCR digests through one combined workflow for minor and major changes. Minor builds remain in GHCR. Approved major releases copy tested images unchanged to ECR; EC2 pulls only promoted ECR digests. See ec2yml Part A.6 for setup/cleanup and Part C for deployment.
+Ec2yml tests exact frontend/backend GHCR digests through one combined workflow for minor and major changes. Minor builds remain in GHCR. Approved major releases copy tested images unchanged to ECR; EC2 pulls only promoted ECR digests. See ec2yml Part A.6 for one-time setup and Part C.0 for every minor/major update. Minor updates stop after C.0.2; approved major releases continue to promotion and deployment.
 
 ## Combined browser-test interface
 
