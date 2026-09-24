@@ -1,12 +1,13 @@
 import logging
-import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from app.middleware import setup_middleware
-from app.services.media_schema import require_media_schema
+from app.runtime_settings import chat_trace_enabled, log_level
+from app.services.schema_readiness import require_chat_schema, check_readiness
+from app.safe_logging import configure_safe_logging
 from app.services.chat_service import MessageTooLongError, MAX_MESSAGE_LENGTH
 from app.services.consent_service import ConsentRequiredError
 from app.services.conversation_manage_service import (
@@ -20,7 +21,7 @@ from app.services.rate_control_service import (
     TooManyPendingMessagesFromIpError,
 )
 from app.routers import chatroom_router, codes_router, conversations_router, consent_router, site_content_router
-from app.database import engine, Base
+from app.database import engine, coordination_engine, Base
 from app.models.consent import ConsentPolicy  # noqa: F401  -- registers table for create_all
 from app.models.rate_limit import RateLimitCounter  # noqa: F401  -- registers table for create_all
 from app.models.site_content import SiteContent  # noqa: F401  -- registers table for create_all
@@ -30,11 +31,17 @@ from app.models.site_project import SiteProject  # noqa: F401  -- registers tabl
 
 
 logging.basicConfig(
-    level=logging.DEBUG if os.environ.get("ENV", "development") != "production" else logging.INFO,
+    level=log_level(),
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 )
 
 logger = logging.getLogger(__name__)
+configure_safe_logging()
+
+if chat_trace_enabled():
+    # Loud on purpose: this is the switch that puts visitors' messages in the
+    # logs. persona_stand_ec2yml/scripts/deploy_release.py refuses it.
+    logger.warning("CHAT_TRACE is on: prompts, replies and model output about conversations will be logged")
 
 
 @asynccontextmanager
@@ -77,16 +84,28 @@ async def lifespan(application: FastAPI):
     # every boot. Replace it with Alembic (or a one-off migration step in
     # persona_stand_ec2yml/Part_C.md) once the schema settles.
     async with engine.begin() as connection:
-        await require_media_schema(connection)
+        await require_chat_schema(connection)
         await connection.run_sync(Base.metadata.create_all)
+        await check_readiness(connection)
     logger.info("startup: schema check complete (create_all)")
 
     yield
 
     await engine.dispose()
+    await coordination_engine.dispose()
 
 
 app = FastAPI(title="My Backend API", lifespan=lifespan)
+
+
+@app.get("/api/health/ready", include_in_schema=False)
+async def ready():
+    try:
+        async with engine.connect() as connection:
+            await check_readiness(connection)
+    except Exception:
+        return JSONResponse(status_code=503, content={"status": "unavailable"})
+    return {"status": "ready"}
 
 
 
@@ -108,15 +127,16 @@ _ERROR_STATUS_DETAIL: list[tuple[type[Exception] | tuple[type[Exception], ...], 
     (
         (ConversationNotFoundError, ConversationAccessDeniedError),
         404,
-        # A BACKSTOP, not a live path -- and knowingly so. No current route
-        # lets these escape: ChatService catches both and starts a fresh
-        # conversation (logging a warning so a frontend that stops adopting the
-        # returned conversationId is visible), and codes_router maps
-        # ConversationAccessDeniedError to its own 403. The entry stays for
-        # whatever route is written next and forgets to catch them, because the
-        # property it enforces is a security one: the same response for both,
-        # so a caller cannot tell an id that does not exist from one owned by
-        # somebody else.
+        # Live for the continue routes only. A chat MESSAGE never gets here:
+        # ChatService catches both and starts a fresh conversation (logging a
+        # warning so a frontend that stops adopting the returned
+        # conversationId is visible), and codes_router maps
+        # ConversationAccessDeniedError to its own 403. A CONTINUE has no
+        # message to start a new conversation with, so
+        # ChatService.handle_continue_turn lets both through to here. The
+        # property this entry enforces is a security one: the same response
+        # for both, so a caller cannot tell an id that does not exist from
+        # one owned by somebody else.
         "conversationId not found",
     ),
     (

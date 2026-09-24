@@ -2,7 +2,7 @@ import logging
 from typing import Any, TypedDict
 
 from fastapi import Depends
-from sqlalchemy import select, update
+from sqlalchemy import inspect, select, update
 from sqlalchemy.sql import func
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -150,7 +150,10 @@ class ConsentService:
           Note this returns the ROW, whose terms may still be unusable -- use
           get_current_terms when what you want is displayable wording.
         """
-        if self._policy_cached:
+        # Chat releases its read transaction before waiting for the session
+        # lock. Rollback expires ORM rows even with expire_on_commit=False;
+        # re-read asynchronously instead of triggering lazy I/O on attribute access.
+        if self._policy_cached and (self._policy_cache is None or not inspect(self._policy_cache).expired):
             return self._policy_cache
 
         result = await self.db.execute(

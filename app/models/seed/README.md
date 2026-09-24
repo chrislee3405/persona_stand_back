@@ -6,7 +6,9 @@ run [the table migration](../../../scripts/migrations/README.md); seeding does
 not rename existing tables or update populated site tables.
 
 The starting contents of an empty database, as JSON, plus the loader that puts
-them there.
+them there. The loader drops whole lines starting with `//` before parsing, so
+a file can label its groups (see `site_media.json`); a `//` after a value on
+the same line is not treated as a comment.
 
 ```bash
 # from persona_stand_back/, with DATABASE_URL set
@@ -37,6 +39,18 @@ what every `consent_record` row was stamped with, silently, unless somebody
 remembered to replace it. A policy that has not been written yet should be
 **absent** — and an absent policy correctly closes the chat gate rather than
 quietly inventing terms.
+
+## Container data boundary
+
+Runtime images exclude private seed JSON, database exports and backups. Only
+`consent_policy.json` is distributable seed data. To load approved private data,
+mount the approved JSON files individually, read-only, at their matching
+`/app/app/models/seed/<filename>.json` paths for the operator loader command.
+Keep the loader's Python files in place; do not mask the package with a directory
+containing only JSON. Do not rebuild or publish an image containing private data.
+Existing images built before this exclusion may still contain private files:
+check their distribution separately. The export utility remains in the image,
+but its generated output is never an image build input.
 
 ## Most of these files are not in the repository
 

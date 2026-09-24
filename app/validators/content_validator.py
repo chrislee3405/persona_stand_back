@@ -645,8 +645,16 @@ def validate_project_detail(project_id: str, content: Any) -> None:
                 _require_str(video.get("src_tag"), f"{video_path}.src_tag", problems)
                 _optional_str(video.get("poster_tag"), f"{video_path}.poster_tag", problems)
                 _optional_str(video.get("caption"), f"{video_path}.caption", problems)
+                # Optional: show the browser's own playback bar under this
+                # clip. Absent means no bar. true/false or "true"/"false".
+                playback_bar = video.get("playback_bar")
+                if playback_bar is not None and playback_bar not in (True, False, "true", "false"):
+                    problems.add(
+                        f"{video_path}.playback_bar",
+                        'must be true, false, "true" or "false"',
+                    )
                 _reject_unknown_keys(
-                    video, {"src_tag", "poster_tag", "caption"}, video_path, problems
+                    video, {"src_tag", "poster_tag", "caption", "playback_bar"}, video_path, problems
                 )
 
         _reject_unknown_keys(

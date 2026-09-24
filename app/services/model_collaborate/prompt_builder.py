@@ -162,6 +162,18 @@ _BEHAVIOURAL_HEADER = (
     "limit is that you still may not assert a specific fact about the candidate's life."
 )
 
+# Small talk reached Stage 2 as "factual / coverage none" before there was a
+# conversational type, so a "how are you" was answered with the decline
+# instruction: no detail to hand, here is the real person's contact. A social
+# turn asks for nothing, so there is nothing to be missing.
+_CONVERSATIONAL_HEADER = (
+    "This is small talk, not a question about the candidate -- a greeting, a pleasantry, or a "
+    "remark about the conversation. It asks for NO information, so there is nothing to be missing: "
+    "DECLINING IT IS ALWAYS WRONG, and never mention not having a detail or point the interviewer "
+    "elsewhere. Answer it the way the personality would, briefly and warmly, and let the "
+    "interviewer lead on from there. Do not volunteer facts nobody asked for."
+)
+
 _BEHAVIOURAL_FACTS_HEADER = (
     "You may also draw on these facts as supporting examples, and nothing beyond them:"
 )
@@ -187,7 +199,7 @@ def _grounding_section(grounding: dict, prefer_name: str) -> str:
     - prefer_name (str): the candidate's preferred name — comes from ContextGatherer.gather via build_reply, interpolated into every decline instruction so the model is never handed the third-person phrase "the candidate" to copy
 
     Returns:
-    - str: the block placed immediately before the conversation history in the Stage 2 user prompt. A behavioural question is told outright that declining is wrong, whether or not facts came back. A factual question with any usable fact is told to answer from it, and `missing` is scoped to the specific detail rather than licensing a blanket decline. Only a factual question with nothing behind it produces a decline instruction.
+    - str: the block placed immediately before the conversation history in the Stage 2 user prompt. A conversational turn (a greeting or other small talk) gets no fact list at all and is told to answer socially, never to decline. A behavioural question is told outright that declining is wrong, whether or not facts came back. A factual question with any usable fact is told to answer from it, and `missing` is scoped to the specific detail rather than licensing a blanket decline. Only a factual question with nothing behind it produces a decline instruction.
     """
     question_type = grounding.get("question_type", "factual")
     coverage = grounding.get("coverage", "none")
@@ -195,6 +207,11 @@ def _grounding_section(grounding: dict, prefer_name: str) -> str:
     missing = (grounding.get("missing") or "").strip()
 
     parts = []
+    if question_type == "conversational":
+        # No fact list at all: handing one over is an invitation to work it
+        # into a reply that should be a few words long.
+        return _CONVERSATIONAL_HEADER
+
     if question_type == "behavioural":
         parts.append(_BEHAVIOURAL_HEADER)
         if facts:

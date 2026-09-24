@@ -2,6 +2,7 @@ import logging
 
 from fastapi import Depends
 
+from app.chat_trace import trace
 from app.constants import DEFAULT_MODEL
 from app.services.ai.gemini_service import GeminiService
 
@@ -82,7 +83,8 @@ class ResponseParser:
             return [final_response]
 
         if not isinstance(response, list) or not response or not all(isinstance(turn, str) and turn.strip() for turn in response):
-            logger.debug("ResponseParser.parse returned %r, expected a non-empty list of strings -- falling back to one turn.", response)
+            logger.debug("ResponseParser.parse returned no non-empty list of strings -- falling back to one turn.")
+            trace.debug("response parser malformed response: %r", response)
             return [final_response]
 
         if len(response) > max_turns:
@@ -90,5 +92,11 @@ class ResponseParser:
             # together rather than truncating (truncating would silently
             # drop text from what gets displayed).
             response = response[:max_turns - 1] + [" ".join(response[max_turns - 1:])]
+
+        # A later model must not rewrite text that already passed the gate.
+        # Only whitespace between words may change when partitioning bubbles.
+        if " ".join(" ".join(response).split()) != " ".join(final_response.split()):
+            logger.warning("ResponseParser changed approved wording -- using the original reply.")
+            return [final_response]
 
         return response

@@ -9,6 +9,8 @@ selects two versioned images and owns the combined Playwright tests and release.
 - `tests/unit/`: content validation, response splitting and database-reset safety.
 - `tests/media/`: media-table migration and real media API checks in isolated
   schemas of the disposable PostgreSQL database, without chat/NLP dependencies.
+- `tests/migrations/`: the SQL files in `scripts/migrations/` run against a
+  pre-migration schema in an isolated schema, including reruns.
 - `tests/integration/`: real FastAPI requests, signed session cookies, PostgreSQL,
   the real local Presidio privacy detector, and the complete chat pipeline.
 - `tests/fakes/fake_gemini.py`: predictable model answers and simulated failures.

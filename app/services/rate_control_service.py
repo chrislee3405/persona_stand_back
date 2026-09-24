@@ -358,6 +358,23 @@ class RateControlService:
             self.release_slot(session_id)
             raise
 
+    def reserve_continue_slot(self, session_id: str, tier: RateTier) -> None:
+        """
+        Claims one of this session's in-flight slots WITHOUT spending a daily unit, for a continue turn.
+
+        Parameters:
+        - session_id (str): the caller's session -- comes from ChatService.handle_continue_turn
+        - tier (RateTier): "guest" or "invite" -- comes from ChatService.handle_continue_turn, selects which cap in _MAX_PENDING_PER_SESSION applies
+
+        Returns:
+        - None: raises TooManyPendingMessagesError if the session is already at its in-flight cap; otherwise claims a slot. Released by release_slot like any other.
+
+        No daily unit because a continue asks for nothing new: it only
+        answers messages the gate held, and each of those spent its unit when
+        it was sent. With nothing held it makes no model call at all.
+        """
+        self._reserve_pending(session_id, tier)
+
     def release_slot(self, session_id: str) -> None:
         """
         Releases one of this session's in-flight slots once its turn has fully finished (reply persisted, or the turn failed).

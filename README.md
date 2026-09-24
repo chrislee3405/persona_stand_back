@@ -49,10 +49,13 @@ GOOGLE_ADC_PATH=~/.config/gcloud/application_default_credentials.json
 # nothing and every chat turn fails to authenticate.
 GOOGLE_APPLICATION_CREDENTIALS=/app/adc.json
 
-# --- Environment ---------------------------------------------------------
-# Leave unset locally. See the warning under "ENV" below before setting it
+# --- Logging and cookie security -----------------------------------------
+# Leave these unset locally unless you need them. See "LOG_LEVEL,
+# SESSION_COOKIE_SECURE and CHAT_TRACE" below before setting any of them
 # anywhere that is deployed.
-# ENV=production
+# LOG_LEVEL=INFO
+# SESSION_COOKIE_SECURE=true
+# CHAT_TRACE=true    # local debugging only: logs full prompts and replies
 ```
 
 `DATABASE_URL` is written in the plain `postgresql://` form and rewritten to
@@ -60,11 +63,25 @@ GOOGLE_APPLICATION_CREDENTIALS=/app/adc.json
 works unchanged in psql and pgAdmin. An `?sslmode=require` is understood and
 translated for asyncpg.
 
-**`ENV`**: setting it to `production` raises the log level to INFO *and* marks
-the session cookie `Secure`. A `Secure` cookie is never sent over plain
-`http://`, so setting this on a deployment with no TLS locks every visitor out
-of chat — their session is empty on every request, consent never sticks, and
-every turn returns 403. Terminate TLS first.
+**`LOG_LEVEL`, `SESSION_COOKIE_SECURE` and `CHAT_TRACE`** (`app/runtime_settings.py`):
+
+- `LOG_LEVEL` (`DEBUG` / `INFO` / `WARNING` / `ERROR`). Anything serving real
+  visitors runs at `INFO` or above; the deploy script refuses `DEBUG`.
+- `CHAT_TRACE` (`true` / `false`, default `false` everywhere). The only way
+  conversation content reaches the logs: full prompts, model responses, and
+  what a model wrote about a message (the readiness reason, grounding notes,
+  response-gate quotes). All of it goes through one logger,
+  `app.chat_trace` (`app/chat_trace.py`), which is silent without this switch,
+  **even at `DEBUG`**. Turn it on locally to watch the pipeline work. The
+  deploy script refuses it, and the combined browser tests fail if a chat
+  message's text, or any `app.chat_trace` record, appears in the logs.
+- `SESSION_COOKIE_SECURE` (`true` / `false`). A `Secure` cookie is never sent
+  over plain `http://`, so turning this on before the site is HTTPS end to end
+  locks every visitor out of chat — their session is empty on every request,
+  consent never sticks, and every turn returns 403.
+- Unset, both follow the older `ENV` variable: `ENV=production` means `INFO`
+  and `Secure`, anything else means `DEBUG` and not `Secure`. An unrecognised
+  value for either stops the backend at startup instead of guessing.
 
 ### 2. Bring the stack up
 

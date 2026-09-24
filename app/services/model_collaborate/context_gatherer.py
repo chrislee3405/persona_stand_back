@@ -1,15 +1,25 @@
+import asyncio
 import logging
+import time
 
 from fastapi import Depends
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.chat_trace import trace
 from app.constants import DEFAULT_MODEL
 from app.database import get_db
 from app.services.ai.gemini_service import GeminiService
 from app.services.bm25_service import BM25Service
 from app.services.conversation_manage_service import ConversationService
+from app.services.model_collaborate import turn_metrics
 from app.services.model_collaborate.prepare_history import prepare_history
+from app.services.model_collaborate.readiness_service import (
+    CONTINUE_NOTHING_HELD,
+    CONTINUE_VERDICT,
+    RESPOND,
+    ReadinessService,
+)
 from app.models.prompt_reference import DocReference, PersonalityReference, ScenarioReference
 
 logger = logging.getLogger(__name__)
@@ -26,6 +36,19 @@ _EXAMPLE_CANDIDATE_COUNT = 5
 # because the retrieval helpers below return them from two places each.
 _NO_DOC_REFERENCE = "No document reference available."
 _NO_SCENARIO_REFERENCE = "No scenario reference available."
+
+
+async def _continue_verdict() -> dict:
+    """
+    Stands in for the readiness call on a continue turn that has something held.
+
+    Parameters:
+    - none
+
+    Returns:
+    - dict: CONTINUE_VERDICT ("respond") -- goes to gather in the readiness task's place, so the rest of phase 2 runs unchanged
+    """
+    return dict(CONTINUE_VERDICT)
 
 
 # ONE call selects from BOTH topic lists. It used to be two structured calls
@@ -101,9 +124,25 @@ def _format_topic_descriptions(topics_data: list[tuple[str, str]]) -> str:
     return "\n\n".join(f"Topic: {t[0]}\nDescription: {t[1]}" for t in topics_data)
 
 
+def _topic_history_context(recent_messages: list | None) -> str:
+    """
+    Renders the recent-history block the topic-selection prompt reads.
+
+    Parameters:
+    - recent_messages (list | None): recent conversation history — comes from ContextGatherer.gather or _find_topic
+
+    Returns:
+    - str: up to the last 8 messages (4 exchanges) under a labelled header, or "" when there is no history — goes to _select_relevant_topics. Module level rather than inline in _find_topic because gather now calls _select_relevant_topics directly, and both paths must produce the identical block.
+    """
+    if not recent_messages:
+        return ""
+    history_str = prepare_history(recent_messages[-8:], None)
+    return f"Recent conversation history for context:\n{history_str}\n\n"
+
+
 
 class ContextGatherer:
-    def __init__(self, db: AsyncSession = Depends(get_db), gemini_service: GeminiService = Depends(), bm25_service: BM25Service = Depends(), conversation_service: ConversationService = Depends()):
+    def __init__(self, db: AsyncSession = Depends(get_db), gemini_service: GeminiService = Depends(), bm25_service: BM25Service = Depends(), conversation_service: ConversationService = Depends(), readiness_service: ReadinessService | None = None):
         """
         Stores the injected database session and service instances.
 
@@ -112,45 +151,190 @@ class ContextGatherer:
         - gemini_service (GeminiService): calls the Gemini model — injected by FastAPI, or passed explicitly
         - bm25_service (BM25Service): retrieves similar past questions — injected by FastAPI, or passed explicitly
         - conversation_service (ConversationService): reads conversation state — injected by FastAPI, or passed explicitly
+        - readiness_service (ReadinessService | None): decides whether the pending messages should be answered yet — defaults to one built on the same Gemini service, so the existing four-argument construction (ModelCollaborateService, the probe scripts) keeps working
 
         Returns:
-        - None: sets self.db, self.gemini_service, self.bm25_service, self.conversation_service
+        - None: sets self.db, self.gemini_service, self.bm25_service, self.conversation_service, self.readiness_service
         """
         self.db = db
         self.gemini_service = gemini_service
         self.bm25_service = bm25_service
         self.conversation_service = conversation_service
+        self.readiness_service = readiness_service or ReadinessService(gemini_service)
 
-    async def gather(self, user_message: str, conversation_id: str) -> dict:
+    async def gather(self, user_message: str, conversation_id: str, skip_readiness: bool = False) -> dict:
         """
         Collects DB references, similar past questions, and conversation history needed to build a prompt.
 
         Parameters:
         - user_message (str): the user's current message — comes from ModelCollaborateService.model_orchestration
         - conversation_id (str): the conversation being replied to — comes from ModelCollaborateService.model_orchestration
+        - skip_readiness (bool): True on a continue turn — the readiness call is replaced by _continue_verdict, which answers whatever is held without asking the model again
 
         Returns:
-        - dict: similar_examples, doc/scenario reference sections, doc/scenario topic lists, candidate_identity, core_personality, prefer_name, recent_messages, summary — goes to PromptBuilder.build and ModelCollaborateService.model_orchestration
+        - dict: readiness, effective_user_message, pending_messages, evaluated_through, similar_examples, doc/scenario reference sections, doc/scenario topic lists, candidate_identity, core_personality, prefer_name, recent_messages, summary — goes to PromptBuilder.build and ModelCollaborateService.model_orchestration
+
+        Runs in three phases: every database read the model calls need, then
+        the readiness check, topic selection and example re-ranking together,
+        then the reference text for whichever topics were selected. A turn
+        the gate holds or ignores stops at the readiness result and skips the
+        rest of phase 2 and all of phase 3, so it costs one round trip
+        instead of a whole retrieval pass. Phases 1
+        and 3 are sequential because they share one AsyncSession; phase 2 is
+        concurrent because it touches no session at all. The three model calls
+        are independent, so the readiness gate costs a call but not a round
+        trip -- it finishes inside the time the other two were taking anyway.
+
+        THE TURN ANSWERS THE PENDING GROUP, not just `user_message`. A message
+        the gate previously decided to wait on is still pending, so the next
+        message is gathered, grounded and answered together with it; see
+        effective_user_message below.
         """
+        started = time.perf_counter()
+
+        # ---- Phase 1: every database read this turn needs up front ---------
+        #
+        # STRICTLY SEQUENTIAL, and not an oversight. All of these run on the
+        # one AsyncSession this service was constructed with, and a session is
+        # not safe to use from two coroutines at once -- overlapping reads on
+        # one connection raise InterfaceError ("another operation is in
+        # progress") or, worse, interleave inside the turn's transaction.
+        # Nothing here is parallelised without giving each branch its own
+        # session first.
         conversation = await self.conversation_service.get_conversation_unlocked(conversation_id)
         summary = conversation.summary if conversation else None
 
-        # Fetch history first so we can use it to determine topics and to
-        # disambiguate the example re-rank below.
-        recent_messages = await self.conversation_service.get_recent_messages(conversation_id)
-        doc_topic_list, scenario_topic_list = await self._find_topic(user_message, recent_messages)
+        # Everything the visitor has sent that no reply has dealt with yet --
+        # this turn's message, plus anything an earlier turn decided to wait
+        # on. The gate judges the group, and a reply answers the group.
+        pending_messages = await self.conversation_service.get_pending_user_messages(conversation_id)
+        pending_texts = [m.text for m in pending_messages]
+        evaluated_through = pending_messages[-1].order_index if pending_messages else -1
+
+        # The message the rest of the pipeline treats as "what was asked".
+        # Falls back to the caller's text if the cursor and the rows disagree,
+        # so a turn still answers something rather than nothing.
+        effective_user_message = "\n".join(pending_texts) if pending_texts else user_message
+
+        # History first: all three model calls in phase 2 read it, to resolve
+        # what the message refers to, to disambiguate the re-rank, and to tell
+        # a mid-thought fragment from a complete one.
+        recent_messages = await self.conversation_service.get_recent_messages(
+            conversation_id, exclude_last=not pending_messages
+        )
+        if pending_messages:
+            # The pending group is the QUESTION, so it must not also appear in
+            # the history as though it had already been dealt with. Everything
+            # strictly before the group is history; the group itself is not.
+            first_pending_index = pending_messages[0].order_index
+            recent_messages = [m for m in recent_messages if m.order_index < first_pending_index]
+
+        doc_topics_data = await self._get_doc_topics()
+        scenario_topics_data = await self._get_scenario_topics()
 
         # BM25 ranks by keyword overlap, so its top hit is often a generic
         # row that shares words but not meaning. Pull a few candidates and
         # let the model keep the one that genuinely matches, or none.
-        bm25_candidates = await self.bm25_service.find_similar_questions(user_message, top_k=_EXAMPLE_CANDIDATE_COUNT)
-        similar_examples = await self._select_relevant_example(bm25_candidates, recent_messages, user_message)
+        bm25_candidates = await self.bm25_service.find_similar_questions(effective_user_message, top_k=_EXAMPLE_CANDIDATE_COUNT)
 
+        candidate_identity, core_personality, prefer_name = await self._get_personality_profile()
+        db_elapsed = time.perf_counter() - started
+
+        # ---- Phase 2: the three model calls, concurrently ------------------
+        #
+        # Readiness, topic selection and example re-ranking all read the
+        # history and the pending group, and none reads another's result, so
+        # the turn spends one Gemini round trip on all three rather than
+        # three. None of them touches the database: phase 1 already fetched
+        # everything they read, which is what makes overlapping them safe.
+        #
+        # A NON-RESPOND VERDICT ENDS THE PHASE EARLY. This used to wait for
+        # all three and throw the other two results away, on the reasoning
+        # that they were already in flight so cancelling saved tokens but not
+        # time. That was wrong, and the chatroom showed it: the turn returns
+        # when GATHER returns, so a held turn was still paying for the
+        # slowest of the three -- topic selection, which carries every topic
+        # description in its prompt and is reliably the slowest. A visitor
+        # whose message was merely held still waited a full reply's worth of
+        # time, watching the typing indicator, for no reply at all.
+        #
+        # Awaiting readiness first costs nothing: all three start together,
+        # so if readiness is the slow one the others have long since
+        # finished. If it comes back "wait" or "no_reply", the other two are
+        # cancelled unread and the turn is over in one round trip.
+        #
+        # A CONTINUE WITH NOTHING HELD stops before any call is started --
+        # not merely before one is awaited. A started call is an HTTP request
+        # already on its way to Vertex, and cancelling it does not unsend it.
+        if skip_readiness and not pending_messages:
+            return self._unanswered_context(
+                dict(CONTINUE_NOTHING_HELD), effective_user_message, pending_messages, evaluated_through,
+                candidate_identity, core_personality, prefer_name, recent_messages, summary,
+            )
+        readiness_task = asyncio.ensure_future(
+            _continue_verdict() if skip_readiness
+            else self.readiness_service.check(pending_texts, recent_messages)
+        )
+        topics_task = asyncio.ensure_future(
+            self._select_relevant_topics(
+                doc_topics_data, scenario_topics_data,
+                _topic_history_context(recent_messages), effective_user_message,
+            )
+        )
+        example_task = asyncio.ensure_future(
+            self._select_relevant_example(bm25_candidates, recent_messages, effective_user_message)
+        )
+        tasks = (readiness_task, topics_task, example_task)
+        try:
+            readiness = await readiness_task
+            if readiness["decision"] != RESPOND:
+                # Cancelled, not awaited: these two are HTTP calls that
+                # degrade internally rather than raising, so there is no
+                # result to collect and no exception to retrieve. Waiting for
+                # the cancellation to land would reintroduce the delay this
+                # branch exists to remove.
+                topics_task.cancel()
+                example_task.cancel()
+                logger.debug(
+                    "Readiness returned %s -- skipping topic selection and example re-ranking.",
+                    readiness["decision"],
+                )
+                return self._unanswered_context(
+                    readiness, effective_user_message, pending_messages, evaluated_through,
+                    candidate_identity, core_personality, prefer_name, recent_messages, summary,
+                )
+
+            (doc_topic_list, scenario_topic_list), similar_examples = await asyncio.gather(
+                topics_task, example_task
+            )
+        except BaseException:
+            # A cancelled gather already cancels its children, and all three
+            # calls degrade rather than raise -- but if one ever does raise,
+            # the others must not be left running past the turn that owns
+            # them. CancelledError is included deliberately: the whole-turn
+            # deadline in ChatService cancels this coroutine, and the model
+            # calls have to stop with it.
+            for task in tasks:
+                task.cancel()
+            raise
+        model_elapsed = time.perf_counter() - started - db_elapsed
+
+        # ---- Phase 3: the reads that needed the selection ------------------
+        # Sequential for the same session reason as phase 1.
         doc_reference_section = await self._get_doc_references(doc_topic_list)
         scenario_reference_section = await self._get_scenario_references(scenario_topic_list)
-        candidate_identity, core_personality, prefer_name = await self._get_personality_profile()
+
+        logger.debug(
+            "Context gathered in %.3fs (phase 1 db %.3fs, phase 2 models %.3fs, phase 3 db %.3fs)",
+            time.perf_counter() - started, db_elapsed, model_elapsed,
+            time.perf_counter() - started - db_elapsed - model_elapsed,
+        )
 
         context = {
+            "readiness": readiness,
+            "effective_user_message": effective_user_message,
+            "pending_messages": pending_messages,
+            "evaluated_through": evaluated_through,
             "similar_examples": similar_examples,
             "doc_reference_section": doc_reference_section,
             "scenario_reference_section": scenario_reference_section,
@@ -164,6 +348,43 @@ class ContextGatherer:
         }
 
         return context
+
+    @staticmethod
+    def _unanswered_context(readiness, effective_user_message, pending_messages, evaluated_through,
+                            candidate_identity, core_personality, prefer_name, recent_messages, summary) -> dict:
+        """
+        Builds the context for a turn that is not going to reply.
+
+        Parameters:
+        - readiness (dict): the gate's verdict — comes from gather
+        - effective_user_message (str), pending_messages (list), evaluated_through (int): what was judged — come from gather
+        - candidate_identity (str), core_personality (str), prefer_name (str), recent_messages (list), summary (str | None): everything phase 1 already read — come from gather
+
+        Returns:
+        - dict: the same keys gather always returns, with the retrieval-dependent ones empty — goes to ModelCollaborateService.model_orchestration, which reads only `readiness` and `evaluated_through` before returning
+
+        Every key is present even though this caller reads two of them. A
+        context that is missing keys depending on how the turn went is a
+        KeyError waiting for the first piece of code that logs or inspects
+        one, and the empty values are the honest answer here: no topics were
+        selected because nothing asked for any.
+        """
+        return {
+            "readiness": readiness,
+            "effective_user_message": effective_user_message,
+            "pending_messages": pending_messages,
+            "evaluated_through": evaluated_through,
+            "similar_examples": [],
+            "doc_reference_section": _NO_DOC_REFERENCE,
+            "scenario_reference_section": _NO_SCENARIO_REFERENCE,
+            "doc_topic_list": [],
+            "scenario_topic_list": [],
+            "candidate_identity": candidate_identity,
+            "core_personality": core_personality,
+            "prefer_name": prefer_name,
+            "recent_messages": recent_messages,
+            "summary": summary,
+        }
 
     # --- DB Helper Method for Personality Profile ---
 
@@ -333,12 +554,13 @@ class ContextGatherer:
         # covers the call itself raising, including GeminiEmptyResponseError
         # when a safety filter blocks the (entirely benign) re-rank prompt.
         try:
-            response = await self.gemini_service.call_model_structured(
-                model_name=DEFAULT_MODEL,
-                user_prompt=user_prompt,
-                system_prompt=_SELECT_EXAMPLE_SYSTEM_PROMPT,
-                schema=schema
-            )
+            with turn_metrics.stage("example"):
+                response = await self.gemini_service.call_model_structured(
+                    model_name=DEFAULT_MODEL,
+                    user_prompt=user_prompt,
+                    system_prompt=_SELECT_EXAMPLE_SYSTEM_PROMPT,
+                    schema=schema
+                )
         except Exception:
             logger.warning(
                 "_select_relevant_example call failed -- continuing with no stored example.",
@@ -348,7 +570,8 @@ class ContextGatherer:
 
         if not isinstance(response, str) or not response.isdigit():
             if response != "none":
-                logger.debug("_select_relevant_example returned %r, expected a digit index or 'none'", response)
+                logger.debug("_select_relevant_example returned neither a digit index nor 'none'")
+                trace.debug("_select_relevant_example malformed response: %r", response)
             return []
         idx = int(response)
         if idx < 0 or idx >= len(candidates):
@@ -402,12 +625,13 @@ class ContextGatherer:
         # than inventing. A call that RAISES is the same outcome and must be
         # handled the same way.
         try:
-            response = await self.gemini_service.call_model_structured(
-                model_name=DEFAULT_MODEL,
-                user_prompt=user_prompt,
-                system_prompt=_FIND_TOPIC_SYSTEM_PROMPT,
-                schema=schema
-            )
+            with turn_metrics.stage("topics"):
+                response = await self.gemini_service.call_model_structured(
+                    model_name=DEFAULT_MODEL,
+                    user_prompt=user_prompt,
+                    system_prompt=_FIND_TOPIC_SYSTEM_PROMPT,
+                    schema=schema
+                )
         except Exception:
             logger.warning(
                 "_select_relevant_topics call failed -- continuing with no reference topics.",
@@ -416,7 +640,8 @@ class ContextGatherer:
             return [], []
 
         if not isinstance(response, dict):
-            logger.debug("_select_relevant_topics returned %r, expected an object", response)
+            logger.debug("_select_relevant_topics returned no object")
+            trace.debug("_select_relevant_topics malformed response: %r", response)
             return [], []
 
         def keep(key: str, allowed: list[str]) -> list[str]:
@@ -425,7 +650,8 @@ class ContextGatherer:
                 # Absent is expected for a list left out of the schema above;
                 # present-but-not-a-list is the model ignoring the schema.
                 if allowed:
-                    logger.debug("_select_relevant_topics returned %r for %s, expected a list", selected, key)
+                    logger.debug("_select_relevant_topics returned no list for %s", key)
+                    trace.debug("_select_relevant_topics malformed %s: %r", key, selected)
                 return []
             return [topic for topic in selected if topic in allowed]
 
@@ -448,10 +674,8 @@ class ContextGatherer:
         # Up to 4 most recent message pairs (8 messages) for context, rendered
         # by the shared formatter -- the same one _select_relevant_example
         # already uses, so both prompts see history in one consistent shape.
-        history_context = ""
-        if recent_messages:
-            history_str = prepare_history(recent_messages[-8:], None)
-            history_context = f"Recent conversation history for context:\n{history_str}\n\n"
-
-        return await self._select_relevant_topics(doc_topics_data, scenario_topics_data, history_context, user_message)
+        return await self._select_relevant_topics(
+            doc_topics_data, scenario_topics_data,
+            _topic_history_context(recent_messages), user_message,
+        )
 

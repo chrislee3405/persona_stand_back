@@ -4,10 +4,8 @@
 .env.*
 !.env.example
 
-# GCP application-default credentials. Gitignored, but the Dockerfile does
-# `COPY . .`, and docker-compose.yml mounts a real ADC file to this path for
-# local development -- so without this line a local `docker build` bakes a
-# developer's live Google credentials into an image layer.
+# GCP application-default credentials. Keep these out of the build context
+# even though the runtime COPY list is restricted to application directories.
 adc.json
 
 # Local model probes. Gitignored for the same reason they are excluded here:
@@ -49,3 +47,13 @@ image.json
 scripts/publish_image.py
 scripts/test_publish_image.py
 **/__pycache__
+
+# Git ignores do not protect a Docker context. Only public policy data ships.
+app/models/seed/*.json
+!app/models/seed/consent_policy.json
+**/*.dump
+**/*.backup
+backups/
+exports/
+audit/
+output/

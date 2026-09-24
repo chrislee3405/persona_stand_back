@@ -11,6 +11,10 @@ class FakeGemini:
         self.failure = None
         self.delay = 0
         self.malformed_split = False
+        # What the readiness gate decides. "respond" keeps every existing
+        # test running the full pipeline exactly as before the gate existed;
+        # a test that wants a held or ignored message sets one of the others.
+        self.readiness_decision = "respond"
 
     async def call_model(self, model_name, user_prompt, system_prompt=None):
         self.calls.append(("text", user_prompt))
@@ -27,6 +31,8 @@ class FakeGemini:
     async def call_model_structured(self, model_name, user_prompt, system_prompt, schema):
         self.calls.append(("structured", user_prompt))
         properties = schema.get("properties", {})
+        if "decision" in properties:
+            return {"decision": self.readiness_decision, "reason": "fake readiness verdict"}
         if "question_type" in properties:
             return {"question_type": "factual", "coverage": "full", "facts": [REPLY], "missing": ""}
         if "result" in properties:

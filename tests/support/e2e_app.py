@@ -6,7 +6,7 @@ from tests.support.environment import configure_test_environment
 configure_test_environment()
 
 from app.main import app  # noqa: E402
-from app.database import engine  # noqa: E402
+from app.database import engine, coordination_engine  # noqa: E402
 from app.services.ai import gemini_service  # noqa: E402
 from tests.fakes.fake_gemini import FakeGemini  # noqa: E402
 from tests.support.seed import reset_database, seed_database  # noqa: E402
@@ -29,6 +29,7 @@ async def test_lifespan(application):
         yield
     finally:
         await engine.dispose()
+        await coordination_engine.dispose()
 
 
 app.router.lifespan_context = test_lifespan

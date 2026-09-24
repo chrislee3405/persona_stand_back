@@ -2,6 +2,7 @@ import logging
 
 from fastapi import Depends
 
+from app.chat_trace import trace
 from app.constants import DEFAULT_MODEL, Sender
 from app.services.ai.gemini_service import GeminiService
 from app.services.conversation_manage_service import ConversationService
@@ -241,10 +242,8 @@ class ResponseGate:
             return "<pass>", []
 
         if not isinstance(check_result, dict):
-            logger.warning(
-                "ResponseGate verification returned %r, expected an object -- passing the response through unaudited.",
-                check_result
-            )
+            logger.warning("ResponseGate verification returned no object -- passing the response through unaudited.")
+            trace.debug("response gate malformed verification: %r", check_result)
             return "<pass>", []
 
         result = check_result.get("result", "<pass>")
@@ -311,10 +310,13 @@ class ResponseGate:
             grounded = [v for v in violations if v["quote"] and v["quote"] in current_response]
             discarded = [v for v in violations if v not in grounded]
             for v in discarded:
+                # The category is a fixed label; the reason and quote are the
+                # auditor's words about the reply, so they are trace-only.
                 logger.warning(
-                    "ResponseGate.check attempt %d/%d: dropped %s violation (%s) -- quoted %r, which isn't in the response.",
-                    attempt + 1, regen_counter, v.get("category"), v.get("reason"), v.get("quote")
+                    "ResponseGate.check attempt %d/%d: dropped %s violation -- its quote isn't in the response.",
+                    attempt + 1, regen_counter, v.get("category"),
                 )
+                trace.debug("response gate dropped violation reason=%r quote=%r", v.get("reason"), v.get("quote"))
 
             # Nothing survived, so there is no evidence the response is
             # actually at fault -- let it through, as before.

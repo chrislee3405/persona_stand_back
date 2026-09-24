@@ -17,6 +17,14 @@ class Conversation(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     code = Column(String, nullable=True, default=GUEST_CODE)
     last_summarized_index = Column(Integer, nullable=False, default=-1)
+    # How far the readiness gate has dealt with this conversation's user
+    # messages: every USER row at or below it has either been replied to or
+    # deliberately left unanswered, and every USER row above it is still
+    # pending. Conversation-level rather than per-message because "wait" is a
+    # statement about the conversation's tail, not about one row -- the next
+    # message re-evaluates the whole pending group together. -1 means nothing
+    # has been handled yet, matching last_summarized_index's convention.
+    last_handled_index = Column(Integer, nullable=False, default=-1, server_default="-1")
     summary = Column(Text, nullable=True)  # running summary, appended every N pairs
 
 

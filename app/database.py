@@ -103,9 +103,18 @@ engine = create_async_engine(
     DATABASE_URL,
     connect_args=_CONNECT_ARGS,
     pool_size=10,
+    hide_parameters=True,
     max_overflow=10,
     pool_pre_ping=True,
     pool_recycle=1800,
+)
+
+# Session-work locks must not consume the pool needed to finish a message.
+# At most eight active coordinated operations per worker; waiters hold no
+# application connection. The lock itself is shared through PostgreSQL.
+coordination_engine = create_async_engine(
+    DATABASE_URL, connect_args=_CONNECT_ARGS, hide_parameters=True,
+    pool_size=2, max_overflow=6, pool_pre_ping=True, pool_recycle=1800,
 )
 
 # expire_on_commit=False, deliberately. With the default (True) every commit

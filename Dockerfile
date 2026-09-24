@@ -44,17 +44,22 @@ RUN pip install --no-cache-dir /wheels/* && rm -rf /wheels
 #
 # A fixed uid (not just a name) so a bind-mounted volume in the local compose
 # file has predictable ownership across machines.
-RUN useradd --create-home --uid 10001 appuser
+RUN useradd --create-home --uid 10001 appuser \
+    && mkdir -p /app/audit/db \
+    && chown appuser:appuser /app/audit /app/audit/db
 
-# Copy application code
-COPY --chown=appuser:appuser . .
+# Explicit runtime directories. Private seed payloads are excluded from the
+# context; operator seed loading uses an explicit read-only data mount.
+COPY --chown=appuser:appuser app/ ./app/
+COPY --chown=appuser:appuser scripts/migrations/ ./scripts/migrations/
+COPY --chown=appuser:appuser scripts/export_content.py ./scripts/export_content.py
 
 USER appuser
 
 EXPOSE 8000
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
-    CMD curl -f http://127.0.0.1:8000/docs || exit 1
+    CMD curl -f http://127.0.0.1:8000/api/health/ready || exit 1
 
 # NO --reload. It is a development flag: it starts a supervisor process plus a
 # worker and installs a filesystem watcher over /app, which in a deployed

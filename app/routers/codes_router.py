@@ -6,6 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
+from app.services.session_work import session_work
 from app.dependencies.session import get_client_ip, get_or_create_session_id, set_verified_invite_code_id
 from app.services.code_service import CodeService, InvalidCodeError
 from app.services.consent_service import ConsentService
@@ -92,81 +93,85 @@ async def verify_code(
             detail="Invite code verification is temporarily unavailable. Please try again later.",
         )
 
-    try:
-        matched = await service.match_code(
-            input_code=payload.inputCode,
-            conversation_id=payload.conversationId,
-            session_id=session_id
-        )
-    except InvalidCodeError:
-        # Count it, then refuse. This is the only thing that increments either
-        # ceiling.
-        await rate_control.record_invite_code_failure(db, client_ip)
-        # 401, not 400: the request itself is well-formed, the credential in it
-        # is simply not valid. (It said 400 with the internal phrase "Process
-        # result not found", which the frontend surfaces verbatim to the
-        # visitor -- errorDetail() in lib/api.ts prefers the server's message.)
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="That invite code wasn't recognised. Check it and try again."
-        )
-    except ConversationAccessDeniedError:
-        # The code itself was valid, but this session didn't create the
-        # conversation it tried to upgrade — don't leak which is true.
-        # Not a failed CODE attempt, so it does not count toward the ceilings.
-        await db.rollback()
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="cannot link code to a conversation this session doesn't own"
-        )
-    except ConversationCodeAlreadyLinkedError:
-        await db.rollback()
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="conversation is already linked to a different invite code"
+    # Share the chat lock through lookup, linkage and rotation. No message can
+    # be published with the old owner while the ownership transaction commits.
+    await db.rollback()
+    async with session_work(session_id):
+        try:
+            matched = await service.match_code(
+                input_code=payload.inputCode,
+                conversation_id=payload.conversationId,
+                session_id=session_id
+            )
+        except InvalidCodeError:
+            # Count it, then refuse. This is the only thing that increments either
+            # ceiling.
+            await rate_control.record_invite_code_failure(db, client_ip)
+            # 401, not 400: the request itself is well-formed, the credential in it
+            # is simply not valid. (It said 400 with the internal phrase "Process
+            # result not found", which the frontend surfaces verbatim to the
+            # visitor -- errorDetail() in lib/api.ts prefers the server's message.)
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="That invite code wasn't recognised. Check it and try again."
+            )
+        except ConversationAccessDeniedError:
+            # The code itself was valid, but this session didn't create the
+            # conversation it tried to upgrade — don't leak which is true.
+            # Not a failed CODE attempt, so it does not count toward the ceilings.
+            await db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="cannot link code to a conversation this session doesn't own"
+            )
+        except ConversationCodeAlreadyLinkedError:
+            await db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="conversation is already linked to a different invite code"
+            )
+
+        # --- Session rotation --------------------------------------------------
+        # This is the moment the session gains privilege, so it stops using the id
+        # it had before it. Without rotation, an id an attacker already knows --
+        # and over plain HTTP one can be planted in the victim's browser, because
+        # a response that is not authenticated can be rewritten in flight -- is
+        # the same id that ends up holding the invite tier, the consent record and
+        # ownership of the conversation.
+        #
+        # There is no server-side session store to expire (the session IS the
+        # signed cookie), so "invalidating" the old id means moving everything
+        # that made it worth having: after the transaction below, a replayed old
+        # cookie names a session that owns no conversation and holds no consent.
+        #
+        # ONE TRANSACTION. The code link (done inside match_code), the ownership
+        # move and the consent move commit together or not at all -- a partial
+        # rotation would strand the visitor with a new cookie whose id owns none
+        # of their history and an old id their browser no longer has.
+        new_session_id = str(uuid.uuid4())
+        moved_conversations = await conversation_service.transfer_ownership(session_id, new_session_id)
+        moved_consents = await consent_service.transfer_records(session_id, new_session_id)
+        await db.commit()
+
+        request.session.clear()
+        request.session["session_id"] = new_session_id
+        # This is the actual authorization event. Every /api/invitechat call
+        # from here on derives its verified status from this session cookie —
+        # the client never needs to (and no longer does) send the code again.
+        # The session records the code's database id, never the code: the cookie
+        # is signed but readable, so the plaintext code used to be recoverable
+        # from it with a base64 decode (see set_verified_invite_code_id).
+        set_verified_invite_code_id(request, matched.id)
+
+        logger.info(
+            "invite code verified: rotated session id, moved %d conversation(s) and %d consent record(s)",
+            moved_conversations, moved_consents,
         )
 
-    # --- Session rotation --------------------------------------------------
-    # This is the moment the session gains privilege, so it stops using the id
-    # it had before it. Without rotation, an id an attacker already knows --
-    # and over plain HTTP one can be planted in the victim's browser, because
-    # a response that is not authenticated can be rewritten in flight -- is
-    # the same id that ends up holding the invite tier, the consent record and
-    # ownership of the conversation.
-    #
-    # There is no server-side session store to expire (the session IS the
-    # signed cookie), so "invalidating" the old id means moving everything
-    # that made it worth having: after the transaction below, a replayed old
-    # cookie names a session that owns no conversation and holds no consent.
-    #
-    # ONE TRANSACTION. The code link (done inside match_code), the ownership
-    # move and the consent move commit together or not at all -- a partial
-    # rotation would strand the visitor with a new cookie whose id owns none
-    # of their history and an old id their browser no longer has.
-    new_session_id = str(uuid.uuid4())
-    moved_conversations = await conversation_service.transfer_ownership(session_id, new_session_id)
-    moved_consents = await consent_service.transfer_records(session_id, new_session_id)
-    await db.commit()
-
-    request.session.clear()
-    request.session["session_id"] = new_session_id
-    # This is the actual authorization event. Every /api/invitechat call
-    # from here on derives its verified status from this session cookie —
-    # the client never needs to (and no longer does) send the code again.
-    # The session records the code's database id, never the code: the cookie
-    # is signed but readable, so the plaintext code used to be recoverable
-    # from it with a base64 decode (see set_verified_invite_code_id).
-    set_verified_invite_code_id(request, matched.id)
-
-    logger.info(
-        "invite code verified: rotated session id, moved %d conversation(s) and %d consent record(s)",
-        moved_conversations, moved_consents,
-    )
-
-    # No echo of the code in any form. `received`, `returned_result` and then
-    # `verifiedCode` each handed the credential back to whoever sent it; the
-    # client already knows what it typed, and a second tab learns only that
-    # the session IS verified (GET /api/chatroom_initialize), never with what.
-    return {
-        "status": "success",
-    }
+        # No echo of the code in any form. `received`, `returned_result` and then
+        # `verifiedCode` each handed the credential back to whoever sent it; the
+        # client already knows what it typed, and a second tab learns only that
+        # the session IS verified (GET /api/chatroom_initialize), never with what.
+        return {
+            "status": "success",
+        }

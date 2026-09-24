@@ -2,6 +2,7 @@ import logging
 
 from fastapi import Depends
 
+from app.chat_trace import trace
 from app.constants import DEFAULT_MODEL
 from app.services.ai.gemini_service import GeminiService
 from app.services.model_collaborate.prepare_history import prepare_history
@@ -49,10 +50,20 @@ _GROUND_SYSTEM_PROMPT = (
     "- \"behavioural\" how the candidate would ACT, what they value, their "
     "approach or opinion, or a hypothetical -- questions answerable from "
     "character alone.\n"
+    # Without this third value, ordinary chat had nowhere to go. "How are
+    # you" asks nothing about the candidate's life and nothing about how they
+    # would act, so it came back "factual" with coverage "none" -- and the
+    # writer dutifully answered a greeting by declining and handing out
+    # contact details. Small talk is not a question the reference material
+    # could ever cover; it needs no facts at all.
+    "- \"conversational\" greetings, small talk and social turns that ask for "
+    "no information: \"hi\", \"how are you\", \"nice to meet you\", \"thanks\", "
+    "\"how's your day going\", and remarks about the conversation itself.\n"
     "This depends ONLY on the question. Whether any material supports it is "
     "irrelevant here: a factual question with nothing to support it is still "
     "factual. Never use \"behavioural\" to signal that material is missing -- "
-    "that is what `coverage` is for.\n\n"
+    "that is what `coverage` is for, and \"conversational\" is only for a turn "
+    "that asks for nothing at all.\n\n"
     "2. `coverage` -- how much of what was asked the material actually "
     "supplies:\n"
     "- \"full\"    everything asked for is there\n"
@@ -63,7 +74,9 @@ _GROUND_SYSTEM_PROMPT = (
     "round anything -- above all not dates, years, durations or counts. If the "
     "material names something without describing it, the name is the fact; its "
     "details are not. For a behavioural question, include any facts that could "
-    "serve as a genuine example, or leave the list empty.\n\n"
+    "serve as a genuine example, or leave the list empty. For a conversational "
+    "turn leave `facts` empty, set `coverage` to \"none\" and leave `missing` "
+    "empty -- nothing was asked, so nothing is missing.\n\n"
     # Reference rows often open with a CV-style header ("Master of X (AI) |
     # GPA: ...") above the prose that qualifies it. This stage reliably took
     # the header as the fact and dropped the qualifier: given a row saying
@@ -93,7 +106,7 @@ _GROUND_USER_PROMPT_TEMPLATE = (
 _GROUND_RESPONSE_SCHEMA = {
     "type": "OBJECT",
     "properties": {
-        "question_type": {"type": "STRING", "enum": ["factual", "behavioural"]},
+        "question_type": {"type": "STRING", "enum": ["factual", "behavioural", "conversational"]},
         "coverage": {"type": "STRING", "enum": ["full", "partial", "none"]},
         "facts": {"type": "ARRAY", "items": {"type": "STRING"}},
         "missing": {"type": "STRING"},
@@ -139,9 +152,8 @@ class GroundingService:
         """
         system_prompt, user_prompt = self._build_prompts(user_message, context)
 
-        logger.debug("=== Gemini call: grounding (stage 1) ===")
-        logger.debug("System prompt: %s", system_prompt)
-        logger.debug("User prompt: %s", user_prompt)
+        trace.debug("grounding (stage 1) system prompt: %s", system_prompt)
+        trace.debug("grounding (stage 1) user prompt: %s", user_prompt)
 
         try:
             grounding = await self.gemini_service.call_model_structured(
@@ -155,18 +167,18 @@ class GroundingService:
             grounding = None
 
         if not isinstance(grounding, dict) or "question_type" not in grounding:
-            logger.warning(
-                "Grounding returned %r, expected question_type/coverage -- treating as no facts.",
-                grounding
-            )
+            # The response itself is model output about the conversation, so
+            # it goes to the trace logger; this line only says it happened.
+            logger.warning("Grounding returned no question_type/coverage -- treating as no facts.")
+            trace.debug("grounding malformed response: %r", grounding)
             grounding = dict(GROUND_FALLBACK)
 
         logger.debug(
-            "Grounding question_type=%s coverage=%s facts=%d missing=%r",
+            "Grounding question_type=%s coverage=%s facts=%d",
             grounding.get("question_type"), grounding.get("coverage"),
-            len(grounding.get("facts") or []), grounding.get("missing")
+            len(grounding.get("facts") or []),
         )
-        logger.debug("=== End Gemini call ===")
+        trace.debug("grounding facts=%r missing=%r", grounding.get("facts"), grounding.get("missing"))
 
         return grounding
 

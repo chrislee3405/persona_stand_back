@@ -1,7 +1,7 @@
 import uuid
 
 from fastapi import Depends
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.constants import GUEST_CODE, NON_PROMPT_SENDERS, Sender
@@ -77,6 +77,7 @@ class ConversationService:
             select(conversation_models.Conversation)
             .where(conversation_models.Conversation.conversation_id == conversation_id)
             .with_for_update()
+            .execution_options(populate_existing=True)
         )
         return result.scalar_one_or_none()
 
@@ -113,7 +114,7 @@ class ConversationService:
         self.db.add(entry)
         return entry
 
-    async def append_message(self, conversation_id: str | None, code: str | None, session_id: str, sender: str, text: str, selected_scenario: str | None = None, selected_document: str | None = None) -> tuple[conversation_models.Message, str]:
+    async def append_message(self, conversation_id: str | None, code: str | None, session_id: str, sender: str, text: str, selected_scenario: str | None = None, selected_document: str | None = None, *, commit: bool = True) -> tuple[conversation_models.Message, str]:
         """
         Inserts a new message row, creating the conversation first if conversation_id is None, or verifying ownership if it isn't.
 
@@ -159,8 +160,10 @@ class ConversationService:
             selected_document=selected_document
         )
         self.db.add(message)
-        await self.db.commit()
-        await self.db.refresh(message)
+        await self.db.flush()
+        if commit:
+            await self.db.commit()
+            await self.db.refresh(message)
         return message, conversation.conversation_id
 
     async def retag_message_sender(self, message: conversation_models.Message, sender: str) -> None:
@@ -228,6 +231,140 @@ class ConversationService:
             recent_messages = recent_messages[:-1]
 
         return recent_messages
+
+    async def get_pending_user_messages(self, conversation_id: str) -> list[conversation_models.Message]:
+        """
+        Fetches the conversation's user messages that the readiness gate has not dealt with yet.
+
+        Parameters:
+        - conversation_id (str): the conversation to read — comes from ContextGatherer.gather
+
+        Returns:
+        - list[Message]: Sender.USER rows above the conversation's last_handled_index, oldest first — goes to ContextGatherer.gather, which joins their text into the message the turn actually answers and hands them to ReadinessService
+
+        Sender.USER only. A message retagged Sender.UNANSWERED_USER by a failed
+        turn is deliberately NOT pending: nothing answered it, but nothing is
+        going to -- the visitor was already told that turn failed. Leaving it
+        in would make the next message drag a dead question back into the
+        prompt, which is the exact thing the retag exists to prevent.
+
+        Unlocked, for the same reason as get_recent_messages: the caller goes
+        on to make several Gemini calls before anything commits, and a
+        session's turns are already serialised by the database session-work
+        lock, with local pacing provided by RateControlService.turn.
+        """
+        conversation = await self.get_conversation_unlocked(conversation_id)
+        if conversation is None:
+            raise ConversationNotFoundError(conversation_id)
+
+        result = await self.db.execute(
+            select(conversation_models.Message)
+            .where(
+                conversation_models.Message.conversation_id == conversation_id,
+                conversation_models.Message.order_index > conversation.last_handled_index,
+                conversation_models.Message.sender == Sender.USER,
+            )
+            .order_by(conversation_models.Message.order_index.asc())
+        )
+        return list(result.scalars().all())
+
+    async def get_latest_user_order_index(self, conversation_id: str) -> int:
+        """
+        Returns the order_index of the newest user message in a conversation.
+
+        Parameters:
+        - conversation_id (str): the conversation to read — comes from ChatService.handle_chat_turn
+
+        Returns:
+        - int: the highest Sender.USER order_index, or -1 when the conversation has none — goes to ChatService, which compares it with the index a finished run evaluated to decide whether that run is stale
+
+        Read immediately before publishing a reply, so a message that arrived
+        while the models were working is visible here even though the run that
+        is about to finish never saw it.
+        """
+        result = await self.db.execute(
+            select(func.coalesce(func.max(conversation_models.Message.order_index), -1)).where(
+                conversation_models.Message.conversation_id == conversation_id,
+                conversation_models.Message.sender == Sender.USER,
+            )
+        )
+        return result.scalar_one()
+
+    async def mark_handled_up_to(self, conversation_id: str, order_index: int, *, commit: bool = True) -> None:
+        """Advance in SQL so an ORM identity-map snapshot can never rewind it."""
+        await self.db.execute(
+            update(conversation_models.Conversation)
+            .where(conversation_models.Conversation.conversation_id == conversation_id)
+            .values(last_handled_index=func.greatest(conversation_models.Conversation.last_handled_index, order_index))
+            .execution_options(synchronize_session=False)
+        )
+        if commit:
+            await self.db.commit()
+
+    async def publish_turn(self, *, conversation_id: str, session_id: str, code: str | None,
+                           evaluated_through: int, decision: str, reply_text: str | None,
+                           reply_sender: str, selected_document: str | None = None,
+                           selected_scenario: str | None = None) -> str:
+        """Publish one evaluated group atomically, rechecking ownership and ordering.
+
+        Model work has finished. End its read transaction, then lock only for the
+        short publication transaction. A failed write rolls the whole outcome
+        back, leaving the original group recoverable by a later continuation.
+        The cursor also makes repeated publication of the same group a no-op.
+        """
+        await self.db.rollback()
+        async with self.db.begin():
+            conversation = await self.get_conversation_locked(conversation_id)
+            if conversation is None:
+                raise ConversationNotFoundError(conversation_id)
+            self.assert_ownership(conversation, session_id)
+            latest = await self.get_latest_user_order_index(conversation_id)
+            if latest > evaluated_through or (
+                evaluated_through >= 0 and conversation.last_handled_index >= evaluated_through
+            ):
+                return "superseded"
+            if decision == "wait":
+                return decision
+            if decision == "respond":
+                await self.append_message(
+                    conversation_id, code, session_id, reply_sender, reply_text,
+                    selected_scenario=selected_scenario, selected_document=selected_document,
+                    commit=False,
+                )
+                if reply_sender == Sender.SYSTEM:
+                    await self.db.execute(
+                        update(conversation_models.Message).where(
+                            conversation_models.Message.conversation_id == conversation_id,
+                            conversation_models.Message.sender == Sender.USER,
+                            conversation_models.Message.order_index > conversation.last_handled_index,
+                            conversation_models.Message.order_index <= evaluated_through,
+                        ).values(sender=Sender.UNANSWERED_USER)
+                    )
+            if evaluated_through >= 0:
+                await self.mark_handled_up_to(conversation_id, evaluated_through, commit=False)
+        return decision
+
+    async def discard_pending_group(self, conversation_id: str, session_id: str) -> None:
+        """Retag and consume a rejected held group in one short transaction."""
+        await self.db.rollback()
+        async with self.db.begin():
+            conversation = await self.get_conversation_locked(conversation_id)
+            if conversation is None:
+                return
+            self.assert_ownership(conversation, session_id)
+            pending = await self.get_pending_user_messages(conversation_id)
+            if not pending:
+                return
+            through = pending[-1].order_index
+            await self.db.execute(
+                update(conversation_models.Message).where(
+                    conversation_models.Message.conversation_id == conversation_id,
+                    conversation_models.Message.sender == Sender.USER,
+                    conversation_models.Message.order_index > conversation.last_handled_index,
+                    conversation_models.Message.order_index <= through,
+                ).values(sender=Sender.UNANSWERED_USER)
+            )
+            await self.mark_handled_up_to(conversation_id, through, commit=False)
 
     @staticmethod
     def _drop_withheld_turns(messages: list[conversation_models.Message]) -> list[conversation_models.Message]:

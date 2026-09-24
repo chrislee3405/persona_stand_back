@@ -5,7 +5,7 @@ import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
-from app.database import SessionLocal, engine
+from app.database import SessionLocal, engine, coordination_engine
 from app.main import app
 from app.services.ai.gemini_service import GeminiService
 from app.services.rate_control_service import RateControlService, get_rate_control_service
@@ -24,6 +24,7 @@ async def database():
     yield
     await reset_database()
     await engine.dispose()
+    await coordination_engine.dispose()
 
 
 @pytest.fixture

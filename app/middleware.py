@@ -4,6 +4,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 
+from app.runtime_settings import session_cookie_secure
+
 def setup_middleware(app: FastAPI) -> None:
     """
     Attaches CORS and signed-session-cookie middleware to the FastAPI app.
@@ -41,13 +43,14 @@ def setup_middleware(app: FastAPI) -> None:
     # secret isn't configured rather than silently falling back to a
     # guessable default.
     session_secret = os.environ["SESSION_SECRET_KEY"]
-    is_prod = os.environ.get("ENV", "development") == "production"
 
     app.add_middleware(
         SessionMiddleware,
         secret_key=session_secret,
         session_cookie="session",
         same_site="lax",       # switch to "none" (+ https_only=True) if frontend/backend are on different domains
-        https_only=is_prod,    # True in prod; False only so local http dev still works
+        # Secure only once the site is HTTPS end to end -- see
+        # app/runtime_settings.py for why this is its own setting.
+        https_only=session_cookie_secure(),
         max_age=60 * 60 * 24 * 30,  # 30 days
     )

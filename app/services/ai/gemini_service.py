@@ -6,6 +6,8 @@ from typing import Union
 from google import genai
 from google.genai import types
 
+from app.services.model_collaborate import turn_metrics
+
 # Per-call wall-clock ceiling, milliseconds. Bounds ONE hung Vertex
 # connection; 30s is generous against the ~10s a real turn's slowest call
 # takes. It does NOT bound a whole turn: a turn makes 4-12 of these calls in
@@ -118,6 +120,25 @@ def _require_text(response, model_name: str) -> str:
     raise GeminiEmptyResponseError(model_name, finish_reason)
 
 
+def _record_usage(response) -> None:
+    """
+    Reports one call's token usage to the current turn's metrics, if a turn is recording.
+
+    Parameters:
+    - response: the SDK response — comes from call_model / call_model_structured
+
+    Returns:
+    - None: adds the counts to whichever stage is open (see turn_metrics.stage). Guarded because usage_metadata is optional in the SDK and absent from fakes: reporting must never be the reason a turn fails.
+    """
+    usage = getattr(response, "usage_metadata", None)
+    if usage is None:
+        return
+    turn_metrics.record_usage(
+        int(getattr(usage, "prompt_token_count", 0) or 0),
+        int(getattr(usage, "candidates_token_count", 0) or 0),
+    )
+
+
 class GeminiService:
     """
     Owns raw calls to Gemini via Vertex AI. Knows nothing about
@@ -157,6 +178,7 @@ class GeminiService:
                 max_output_tokens=_MAX_OUTPUT_TOKENS,
             )
         )
+        _record_usage(response)
         return _require_text(response, model_name)
 
     async def call_model_structured(self, model_name: str, user_prompt: str, system_prompt: str, schema: dict) -> JSONValue:
@@ -186,4 +208,5 @@ class GeminiService:
                 max_output_tokens=_MAX_OUTPUT_TOKENS,
             )
         )
+        _record_usage(response)
         return json.loads(_require_text(response, model_name))

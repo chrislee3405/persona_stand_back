@@ -85,13 +85,18 @@ def _read(name: str) -> Any:
     Returns:
     - Any: the parsed JSON -- goes to the matching loader function. Returns None
       for a file that is absent, so an optional seed file can simply be deleted.
+
+    Whole lines starting with `//` are comments and are dropped before parsing,
+    so a seed file can label its groups. A `//` after a value on the same line
+    is NOT a comment.
     """
     path = SEED_DIR / name
     if not path.exists():
         logger.info("skip %s (file not present)", name)
         return None
     with path.open("r", encoding="utf-8") as handle:
-        return json.load(handle)
+        lines = [line for line in handle if not line.lstrip().startswith("//")]
+    return json.loads("".join(lines))
 
 
 async def _is_empty(db: AsyncSession, model) -> bool:
