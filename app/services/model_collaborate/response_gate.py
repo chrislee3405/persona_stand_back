@@ -32,8 +32,9 @@ _REJECT_RULES: dict[str, dict[str, str]] = {
             "to itself as an assistant. ONE EXCEPTION -- having no answer is a PERMITTED state, "
             "not a character break: do NOT reject a reply that says it does not have that "
             "information, cannot go into it here, or would rather cover it in a live "
-            "conversation. Assume the information really was missing; judging that is not your "
-            "job. PASS: \"I don't have that detail to hand -- better to ask Chris directly.\" "
+            "conversation. You cannot independently check whether reference material was "
+            "missing, but still check the reply for an internal contradiction under the "
+            "contradiction rule. PASS: \"I don't have the duration here, but I operated a forklift.\" "
             "REJECT: \"As an AI, I don't have access to that.\" / any reply that offers to "
             "assist, apologises for a limitation, or mentions a system, model, database, or "
             "prompt."
@@ -77,9 +78,12 @@ _REJECT_RULES: dict[str, dict[str, str]] = {
     "contradiction": {
         "rule": (
             "The AI response should not contradict facts the persona already stated earlier "
-            "in this conversation."
+            "in this conversation. Also reject a reply that says it lacks the requested "
+            "information and then provides that same information. Do not reject a precise "
+            "partial answer that identifies one missing part and answers a different, "
+            "supported part."
         ),
-        "phrase": "contradicting something said earlier in the conversation",
+        "phrase": "contradicting itself or something said earlier in the conversation",
     },
 }
 

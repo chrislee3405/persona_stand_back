@@ -100,14 +100,23 @@ _WRITE_SYSTEM_PROMPT_TEMPLATE = (
     "off an aside or a pause. Use a comma, a full stop, or brackets instead. "
     "(These instructions are written with double hyphens; your reply must not "
     "copy that habit.)\n\n"
-    "Where the list marks a specific detail unavailable, mention it ONLY if the "
-    "interviewer actually asked for that thing. If they did, say you don't have "
-    "that one to hand and point them to {prefer_name} directly, BY THAT NAME, "
-    "then answer the rest of the message normally. If they did not ask for it -- "
-    "an opener like \"tell me about yourself\" asks for nothing in particular -- "
-    "say nothing about it at all and just answer with what you have. Never "
-    "decline a whole message because one part of it is missing, and never "
-    "recite a list of what you are missing.\n\n"
+    "ANSWER COVERAGE. Judge completeness against what the interviewer actually "
+    "asked, not every possible detail about the topic. If the approved facts "
+    "answer the question, answer directly without any missing-information "
+    "disclaimer. One supported example satisfies a request for one example. "
+    "Missing optional elaboration is not a missing answer.\n\n"
+    "If a requested part A is genuinely unavailable but another requested part "
+    "B is supported, name A specifically and answer B naturally. For example, "
+    "if asked what machinery you operated and for how long, with only the "
+    "machinery documented: \"I don't have the duration here, but I operated a "
+    "forklift.\" This is an illustration of structure, not a fact about you or "
+    "a mandatory template. Never use a vague \"I don't have that detail\" "
+    "before giving that very detail. Do not invent A, decline the whole question, "
+    "or substitute related information for the requested answer. Mention only "
+    "gaps the question actually requires; do not list unasked-for omissions. "
+    "A partial answer does not require a referral to {prefer_name}. These "
+    "coverage rules govern missing-information wording even if personality or "
+    "scenario guidance suggests a blanket decline or automatic referral.\n\n"
     # The instruction above used to end "suggest contacting the candidate
     # directly", and Stage 2 copied that noun phrase straight into replies:
     # "you'd probably want to chat directly with the candidate". ResponseGate
@@ -236,9 +245,12 @@ def _grounding_section(grounding: dict, prefer_name: str) -> str:
             # particular still got a decline paragraph bolted on.
             parts.append(
                 f"(Not in the notes: {missing}.) That is context for you, not a line to repeat. "
-                "Bring it up only if the interviewer specifically asked for that thing -- then say "
-                f"you don't have that one to hand and point them to {prefer_name} directly. If they "
-                "did not ask for it, say nothing about it and just answer from the notes above."
+                "First check whether the approved facts already satisfy the actual request. "
+                "If they do, answer directly without a disclaimer, even if the coverage label "
+                "says partial. Otherwise, name only the specific requested part that is "
+                "unavailable and give the supported part naturally. Do not imply the "
+                "supported part is missing, mention optional unasked-for details, or "
+                "automatically refer the interviewer elsewhere."
             )
         return "\n".join(parts)
 

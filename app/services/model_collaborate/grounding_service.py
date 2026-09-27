@@ -69,6 +69,13 @@ _GROUND_SYSTEM_PROMPT = (
     "- \"full\"    everything asked for is there\n"
     "- \"partial\" some of it is there, some is not\n"
     "- \"none\"    none of it is there\n\n"
+    "Judge coverage against the actual request, not an exhaustive account of "
+    "the topic. One supported example fully covers a request for one example. "
+    "Documented personal contributions can answer what the candidate built "
+    "without a complete team breakdown or implementation history. Do not mark "
+    "coverage partial because optional, unasked-for details are absent. A "
+    "trade-off needs a supported choice and its cost or competing alternative; "
+    "naming two concerns alone does not establish a trade-off.\n\n"
     "List in `facts` only what the material or the conversation actually "
     "states, staying close to their wording. Do not add, infer, combine or "
     "round anything -- above all not dates, years, durations or counts. If the "
@@ -93,7 +100,11 @@ _GROUND_SYSTEM_PROMPT = (
     "it safer, it just leaves the status for someone else to guess at.\n\n"
     "If the interviewer asked for something the material does not contain, "
     "that fact does not exist. Put what is missing in `missing`; never supply "
-    "it yourself. Leave `missing` empty when coverage is \"full\"."
+    "it yourself. Make `missing` identify the specific requested part that "
+    "cannot be answered, not a vague lack of detail or a restatement of the "
+    "whole question when facts answer part of it. Never mark a fact missing "
+    "while also including it in `facts`. Leave `missing` empty when coverage "
+    "is \"full\"."
 )
 
 _GROUND_USER_PROMPT_TEMPLATE = (
