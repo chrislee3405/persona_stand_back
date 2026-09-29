@@ -1,5 +1,6 @@
 """Prompt assembly regressions; these do not measure live model compliance."""
 from app.services.model_collaborate.prompt_builder import PromptBuilder, _grounding_section
+from app.services.model_collaborate.grounding_service import GroundingService
 
 
 def test_complete_answer_omits_even_stale_missing_note():
@@ -48,3 +49,38 @@ def test_writer_resolves_blanket_referral_guidance_without_removing_personality(
     assert "even if personality or scenario guidance suggests" in system
     assert "Operated a forklift." in user
     assert "Duration of forklift work" in user
+
+
+def test_current_intention_can_answer_broad_goal_without_adding_deadline():
+    context = {
+        "prefer_name": "Chris", "candidate_identity": "Chris",
+        "core_personality": "Answer plainly.", "scenario_reference_section": "",
+        "recent_messages": [], "summary": None, "similar_examples": [],
+        "doc_reference_section": "Looking for a graduate or junior developer role.",
+    }
+    question = "Whats your target this year"
+    ground_system, ground_user = GroundingService(gemini_service=object())._build_prompts(question, context)
+    assert context["doc_reference_section"] in ground_user
+    assert question in ground_user
+    assert "current intention can supply full coverage" in ground_system
+    assert "not a promise to obtain it by year-end" in ground_system
+    assert "Do not infer ambitions from qualifications, activities or job requirements alone" in ground_system
+    system, user = PromptBuilder().build_reply(question, context, {
+        "question_type": "factual", "coverage": "full",
+        "facts": [context["doc_reference_section"]], "missing": "A separately written annual plan",
+    })
+    assert context["doc_reference_section"] in user
+    assert "A separately written annual plan" not in user
+    assert "No facts are available" not in user
+    assert "without inventing a deadline or promising an outcome" in system
+
+
+def test_current_intention_does_not_fill_an_explicit_deadline_gap():
+    section = _grounding_section({
+        "question_type": "factual", "coverage": "partial",
+        "facts": ["Seeking a junior developer role."],
+        "missing": "The exact date by which the candidate plans to secure a role",
+    }, "Chris")
+    assert "Seeking a junior developer role." in section
+    assert "exact date" in section
+    assert "No facts are available" not in section

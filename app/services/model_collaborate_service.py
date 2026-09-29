@@ -92,7 +92,7 @@ class ModelCollaborateService:
         self.response_gate = ResponseGate(gemini_service, conversation_service)
         self.response_parser = ResponseParser(gemini_service, min_chars_per_turn=_MIN_CHARS_PER_TURN)
 
-    async def model_orchestration(self, user_message: str, conversation_id: str, session_id: str, tier: RateTier, skip_readiness: bool = False) -> TurnOutcome:
+    async def model_orchestration(self, user_message: str, conversation_id: str, session_id: str, tier: RateTier, skip_readiness: bool = False, job_context: str | None = None) -> TurnOutcome:
         """
         Gathers context, decides whether to reply at all, and -- if so -- what may truthfully be said and how to say it.
 
@@ -102,6 +102,7 @@ class ModelCollaborateService:
         - session_id (str): the caller's session — comes from conversations_router, needed by ResponseGate to persist regen/fallback review rows via ConversationService.append_message
         - tier (RateTier): "guest" or "invite" — comes from ChatService.handle_chat_turn, selects which cap in _REGEN_COUNTER applies
         - skip_readiness (bool): True for ChatService.handle_continue_turn — answer the held group without asking the readiness gate again (see ContextGatherer.gather)
+        - job_context (str | None): current verified invite's description; used only by the invite reply writer, never as grounding evidence
 
         Returns:
         - TurnOutcome: the decision, how far it evaluated, and (only for "respond") the reply text, its display turns and the selected topics — goes to ChatService.handle_chat_turn, which persists the reply, advances the handled cursor and shapes the response body
@@ -148,6 +149,9 @@ class ModelCollaborateService:
                 grounding = await self.grounding_service.ground(effective_message, context)
 
             # 3. Stage 2 -- write the reply from the approved facts only.
+            # Role requirements are not candidate evidence. Add them only after
+            # grounding, from the current verified invite, never conversation attribution.
+            context = {**context, "job_context": job_context if tier == "invite" else None}
             system_prompt, user_prompt = self.prompt_builder.build_reply(effective_message, context, grounding)
             with turn_metrics.stage("reply"):
                 ai_response = await self._generate_reply(system_prompt, user_prompt)

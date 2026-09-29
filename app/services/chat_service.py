@@ -77,7 +77,7 @@ class ChatService:
         self.rate_control_service = rate_control_service
         self.consent_service = consent_service
 
-    async def handle_chat_turn(self, session_id: str, code: str | None, conversation_id: str | None, user_text: str, background_tasks: BackgroundTasks, client_ip: str) -> dict:
+    async def handle_chat_turn(self, session_id: str, code: str | None, conversation_id: str | None, user_text: str, background_tasks: BackgroundTasks, client_ip: str, job_context: str | None = None) -> dict:
         """
         Persists a user's message, generates the AI reply, persists it, and schedules summarization.
 
@@ -221,7 +221,8 @@ class ChatService:
                 try:
                     outcome = await asyncio.wait_for(
                         self.model_service.model_orchestration(
-                            user_text, conversation_id, session_id, tier
+                            user_text, conversation_id, session_id, tier,
+                            **({"job_context": job_context} if tier == "invite" else {}),
                         ),
                         timeout=TURN_DEADLINE_SECONDS,
                     )
@@ -247,7 +248,7 @@ class ChatService:
                 self.rate_control_service.release_ip_slot(client_ip)
             self.rate_control_service.release_slot(session_id)
 
-    async def handle_continue_turn(self, session_id: str, code: str | None, conversation_id: str, background_tasks: BackgroundTasks) -> dict:
+    async def handle_continue_turn(self, session_id: str, code: str | None, conversation_id: str, background_tasks: BackgroundTasks, job_context: str | None = None) -> dict:
         """
         Answers a conversation's held messages without a new one: the visitor went quiet after the readiness gate said "wait".
 
@@ -326,7 +327,8 @@ class ChatService:
                 try:
                     outcome = await asyncio.wait_for(
                         self.model_service.model_orchestration(
-                            "", conversation_id, session_id, tier, skip_readiness=True
+                            "", conversation_id, session_id, tier, skip_readiness=True,
+                            **({"job_context": job_context} if tier == "invite" else {}),
                         ),
                         timeout=TURN_DEADLINE_SECONDS,
                     )

@@ -28,8 +28,11 @@ _SYSTEM_PROMPT = (
     "- Record only what was actually said. Do not add, infer, or round any "
     "detail that is not in the transcript -- especially dates, numbers, "
     "durations and counts.\n"
-    "- Keep straight which side said what, and note where the candidate "
-    "declined to answer rather than dropping it.\n"
+    "- Keep straight which side said what. Preserve concrete background "
+    "facts alongside any declined answers. For each refusal, record the "
+    "specific question or requested part it concerned, not a general lack "
+    "of knowledge. A prior refusal records what happened, not a restriction "
+    "on future answers; do not broaden its scope.\n"
     "Respond only with the updated summary text, with no preamble or explanation."
 )
 

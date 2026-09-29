@@ -2,6 +2,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, Request, HTTPException
 
 from app.services.chat_service import ChatService
 from app.services.code_service import CodeService
+from app.models.code import InviteCode
 from app.dependencies.session import (
     clear_verified_invite_code,
     get_client_ip,
@@ -17,7 +18,7 @@ from app.validators.chat_validator import ChatContinueRequest, ChatMessageCreate
 router = APIRouter()
 
 
-async def _require_invite_code(request: Request, code_service: CodeService) -> str:
+async def _require_invite_code(request: Request, code_service: CodeService) -> InviteCode:
     """
     Resolves the session's verified invite code, or refuses the request as unverified.
 
@@ -26,7 +27,7 @@ async def _require_invite_code(request: Request, code_service: CodeService) -> s
     - code_service (CodeService): resolves the verified invite-code id back to its code — comes from the same route's Depends
 
     Returns:
-    - str: the invite code — goes to ChatService, where it selects the invite tier and is stamped on the conversation for attribution.
+    - InviteCode: the verified database row; its code selects the tier and its optional description supplies role context.
       Raises HTTPException 401 when the session never verified, or verified a code that has since been deleted.
     """
     invite_code_id = get_verified_invite_code_id(request)
@@ -46,7 +47,7 @@ async def _require_invite_code(request: Request, code_service: CodeService) -> s
         # verified state and resends the message as a guest turn.
         clear_verified_invite_code(request)
         raise HTTPException(status_code=401, detail="invite code not verified for this session")
-    return invite.code
+    return invite
 
 
 @router.post("/api/guestchat")
@@ -93,12 +94,13 @@ async def invitechat(payload: ChatMessageCreate, request: Request, background_ta
     - dict: reply text, sender, and conversationId — sent back to the client as the JSON response
     """
     session_id = get_or_create_session_id(request)
-    code = await _require_invite_code(request, code_service)
+    invite = await _require_invite_code(request, code_service)
     client_ip = get_client_ip(request)
 
     return await chat_service.handle_chat_turn(
         session_id=session_id,
-        code=code,
+        code=invite.code,
+        job_context=invite.description,
         conversation_id=payload.conversationId,
         user_text=payload.text,
         background_tasks=background_tasks,
@@ -145,11 +147,12 @@ async def invitechat_continue(payload: ChatContinueRequest, request: Request, ba
     - dict: the same body a chat turn returns — see ChatService.handle_continue_turn. 401 when the session is not (or no longer) verified.
     """
     session_id = get_or_create_session_id(request)
-    code = await _require_invite_code(request, code_service)
+    invite = await _require_invite_code(request, code_service)
 
     return await chat_service.handle_continue_turn(
         session_id=session_id,
-        code=code,
+        code=invite.code,
+        job_context=invite.description,
         conversation_id=payload.conversationId,
         background_tasks=background_tasks,
     )
