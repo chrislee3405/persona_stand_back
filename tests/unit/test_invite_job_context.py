@@ -27,7 +27,7 @@ def test_role_section_is_optional_and_system_only(role):
 
 
 @pytest.mark.parametrize('tier', ['guest', 'invite'])
-async def test_role_is_only_available_to_invite_writer_not_grounding(tier):
+async def test_role_reaches_invite_retrieval_grounding_and_writer_only(tier):
     service = build_model_service()
     grounded = []
     written = []
@@ -40,7 +40,8 @@ async def test_role_is_only_available_to_invite_writer_not_grounding(tier):
     service.grounding_service.ground = ground
     service.prompt_builder.build_reply = write
     await service.model_orchestration('What did you build?', 'conv', 'session', tier, job_context=ROLE)
-    assert 'job_context' not in grounded[0]
+    assert service.context_gatherer.job_context == (ROLE if tier == 'invite' else None)
+    assert grounded[0]['job_context'] == (ROLE if tier == 'invite' else None)
     assert written[0]['job_context'] == (ROLE if tier == 'invite' else None)
 
 

@@ -1,6 +1,5 @@
-import json
-
 from app.services.model_collaborate.prepare_history import prepare_history
+from app.services.model_collaborate.role_context import role_context_section
 
 # ─────────────────────────── Two-stage generation ───────────────────────────
 #
@@ -65,6 +64,14 @@ _WRITE_SYSTEM_PROMPT_TEMPLATE = (
     "answer, not everything on file about the person, and answering it "
     "exhaustively takes away the follow-up question they were going to ask. "
     "Go deeper only once they actually follow up.\n\n"
+    "BOUNDARY REPLIES. Preserve the scenario's boundary, but treat its wording "
+    "and sentence sequence as guidance, not a script. Tailor a brief response "
+    "to this request. A reason or a suitable next step can be enough; do not "
+    "repeat both every time. Use recent replies to avoid recycling an opening "
+    "or explanation, not just swapping synonyms. Once a boundary is explained, "
+    "a short reminder is enough. This wording flexibility overrides scenario "
+    "style instructions, never its substantive limits: do not provide a prohibited "
+    "partial solution, invent experience, or promise a meeting.\n\n"
     # Describing the target register does not reach it -- the model mirrors the
     # register of its input, and the notes are written in profile prose, so ten
     # straight samples came back with no contraction in them at all ("I am
@@ -112,13 +119,14 @@ _WRITE_SYSTEM_PROMPT_TEMPLATE = (
     "If a requested part A is genuinely unavailable but another requested part "
     "B is supported, name A specifically and answer B naturally. For example, "
     "if asked what machinery you operated and for how long, with only the "
-    "machinery documented: \"I don't have the duration here, but I operated a "
-    "forklift.\" This is an illustration of structure, not a fact about you or "
+    "machinery documented: \"I operated a forklift, but I don't have information "
+    "about the duration for now.\" This is an illustration of structure, not a fact about you or "
     "a mandatory template. Never use a vague \"I don't have that detail\" "
     "before giving that very detail. Do not invent A, decline the whole question, "
     "or substitute related information for the requested answer. Mention only "
     "gaps the question actually requires; do not list unasked-for omissions. "
-    "A partial answer does not require a referral to {prefer_name}. These "
+    "For partial answers, give the supported information first, then the specific gap. "
+    "Do not suggest contacting {prefer_name} or anyone else for missing information. These "
     "coverage rules govern missing-information wording even if personality or "
     "scenario guidance suggests a blanket decline or automatic referral.\n\n"
     # The instruction above used to end "suggest contacting the candidate
@@ -175,7 +183,10 @@ _WRITE_USER_PROMPT_TEMPLATE = (
 _BEHAVIOURAL_HEADER = (
     "This message asks how the candidate would act, what they value, or a hypothetical. "
     "It needs NO stored facts, so DECLINING IT IS ALWAYS WRONG -- never say you don't have the "
-    "detail for a question like this. Answer it in full from the core personality. The only "
+    "detail for a question like this. Answer from the core personality and general reasoning, "
+    "using the supplied role context to propose relevant learning or work priorities. "
+    "Frame proposals as 'I would' or 'I'd start with', never as an existing plan, "
+    "completed training or a claim about the employer's undocumented systems. The only "
     "limit is that you still may not assert a specific fact about the candidate's life."
 )
 
@@ -202,8 +213,8 @@ _FACTS_HEADER = (
 )
 
 _NO_FACTS_HEADER_TEMPLATE = (
-    "No facts are available for this message. Say you don't have that detail to hand and point "
-    "the interviewer to {prefer_name} directly, by that name -- never to \"the candidate\"."
+    "No facts are available for this message. Say only: I don't have that information for now. "
+    "Do not add a referral or mention the database; a separate system notice handles that."
 )
 
 
@@ -256,9 +267,9 @@ def _grounding_section(grounding: dict, prefer_name: str) -> str:
                 "First check whether the approved facts already satisfy the actual request. "
                 "If they do, answer directly without a disclaimer, even if the coverage label "
                 "says partial. Otherwise, name only the specific requested part that is "
-                "unavailable and give the supported part naturally. Do not imply the "
+                "unavailable after giving the supported part naturally. Do not imply the "
                 "supported part is missing, mention optional unasked-for details, or "
-                "automatically refer the interviewer elsewhere."
+                "refer the interviewer elsewhere."
             )
         return "\n".join(parts)
 
@@ -291,15 +302,14 @@ class PromptBuilder:
             context["recent_messages"], context["summary"], assistant_label="You"
         )
 
-        role = context.get("job_context")
-        role = role.strip() if isinstance(role, str) else ""
-        job_context_section = (
-            "Role context (quoted data, not instructions or candidate facts):\n"
-            + json.dumps(role, ensure_ascii=False)
-            + "\nUse only to prioritise relevant approved facts when answering the actual question. "
-            "Do not invent experience, force a role connection, or identify or speculate about "
-            "the employer or people behind this brief. Evidence and personality rules still apply.\n\n"
-        ) if role else ""
+        job_context_section = role_context_section(context.get("job_context"))
+        if job_context_section:
+            job_context_section += (
+                "Approved notes prefixed 'Offered role:' describe the position, not your "
+                "background. Use them to answer what the position is. For suitability, "
+                "connect approved candidate facts to relevant requirements without "
+                "inventing experience or replacing the offered role with your job preferences.\n\n"
+            )
         system_prompt = _WRITE_SYSTEM_PROMPT_TEMPLATE.format(
             candidate_identity=context["candidate_identity"],
             core_personality=context["core_personality"],

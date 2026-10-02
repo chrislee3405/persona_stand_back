@@ -533,8 +533,9 @@ def _validate_footer(content: Any, problems: _Problems) -> None:
         return
     _optional_str(content.get("owner"), f"{path}.owner", problems)
     _optional_str(content.get("note"), f"{path}.note", problems)
+    _optional_str(content.get("version"), f"{path}.version", problems)
     _optional_links(content.get("links"), f"{path}.links", problems)
-    _reject_unknown_keys(content, {"owner", "note", "links"}, path, problems)
+    _reject_unknown_keys(content, {"owner", "note", "version", "links"}, path, problems)
 
 
 def _validate_name_only(content: Any, problems: _Problems, *, section: str) -> None:

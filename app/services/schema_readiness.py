@@ -16,10 +16,20 @@ async def require_chat_schema(connection):
             "Conversation cursor migration required. Stop the old backend and run "
             "scripts/migrations/20260920_conversation_last_handled_index.sql."
         )
+    if await connection.scalar(text("SELECT to_regclass('message')")):
+        if not await connection.scalar(text("""
+            SELECT EXISTS (SELECT 1 FROM pg_attribute
+            WHERE attrelid = 'message'::regclass AND attname = 'token_usage'
+              AND atttypid = 'jsonb'::regtype AND NOT attnotnull AND NOT attisdropped)
+        """)):
+            raise RuntimeError(
+                "Message token usage migration required. Run "
+                "scripts/migrations/20261002_message_token_usage.sql before deploying this backend."
+            )
 
 
 async def check_readiness(connection):
     await require_chat_schema(connection)
     # Resolve required columns and table permissions even when there are no rows.
     await connection.execute(text("SELECT last_handled_index FROM conversation LIMIT 0"))
-    await connection.execute(text("SELECT order_index FROM message LIMIT 0"))
+    await connection.execute(text("SELECT order_index, token_usage FROM message LIMIT 0"))

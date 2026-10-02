@@ -1,5 +1,7 @@
 from sqlalchemy import Column, Integer, String, Text, ForeignKey, UniqueConstraint, DateTime
 from sqlalchemy.sql import func
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.orm import deferred
 from app.constants import GUEST_CODE
 from app.database import Base
 
@@ -44,4 +46,6 @@ class Message(Base):
     # questionable answer can be traced back to its references in pgAdmin.
     selected_scenario = Column(String, nullable=True)
     selected_document = Column(String, nullable=True)
+    # One entry per model run on the triggering user row; never sent to the AI.
+    token_usage = deferred(Column(JSONB, nullable=True))
     created_at = Column(DateTime(timezone=True), server_default=func.now())

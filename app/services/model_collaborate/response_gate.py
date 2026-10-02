@@ -43,10 +43,10 @@ _REJECT_RULES: dict[str, dict[str, str]] = {
     },
     "unnatural": {
         "rule": (
-            "The response should read like a person typing in a chat, not an assistant composing. "
-            "Reject an opener that services the question (\"Great question\", \"Certainly\", "
-            "\"I'd be happy to\"), restating the interviewer's question before answering it, or a "
-            "tidily balanced summary structure nobody types live."
+            "Natural wording is a writing preference, not a delivery requirement. "
+            "Ordinary interview formality, complete sentences, professional vocabulary, "
+            "mildly polished phrasing or an opener are not grounds for rejection. "
+            "Do not report style-only concerns as violations or relabel them as another category."
         ),
         "phrase": "sounding unnatural",
     },
@@ -77,11 +77,15 @@ _REJECT_RULES: dict[str, dict[str, str]] = {
     },
     "contradiction": {
         "rule": (
-            "The AI response should not contradict facts the persona already stated earlier "
-            "in this conversation. Also reject a reply that says it lacks the requested "
-            "information and then provides that same information. Do not reject a precise "
-            "partial answer that identifies one missing part and answers a different, "
-            "supported part."
+            "Reject only two explicit claims that cannot both be true about the same "
+            "subject, scope and time. One must be in the current reply; the other must "
+            "be elsewhere in that reply or a previous persona reply. Quote both claims "
+            "and explain their incompatibility. A user question, implied expectation, "
+            "missing detail or failure to answer directly is not a conflicting claim. "
+            "Different time horizons or goals are not inherently contradictory. "
+            "Saying a specific fact is unavailable while providing that same fact is "
+            "a contradiction; answering a supported part while identifying a different "
+            "missing part is not."
         ),
         "phrase": "contradicting itself or something said earlier in the conversation",
     },
@@ -120,7 +124,11 @@ _VERIFY_NATURAL_RESPONSE_SYSTEM_PROMPT_TEMPLATE = (
     f"Each violation has: category, the tag of the broken rule ({', '.join(_CATEGORIES)}); "
     "reason, a specific explanation of what broke; and quote, the exact "
     "substring of the AI response that demonstrates it, copied "
-    "character-for-character, not a paraphrase or summary.\n\n"
+    "character-for-character, not a paraphrase or summary. For contradiction, also "
+    "supply conflicting_quote (the other exact claim) and conflict_source "
+    "('response' or 'history'). History evidence must be from the persona, never "
+    "the interviewer. For other categories use an empty conflicting_quote and "
+    "conflict_source 'none'. If no explicit opposing claim exists, do not reject.\n\n"
     "A violation you cannot ground in an exact substring of the response is a "
     "guess -- leave it out. If that leaves no violations at all, return "
     "\"<pass>\" with an empty violations list instead."
@@ -165,6 +173,25 @@ def is_fallback_response(text: str) -> bool:
     True if `text` is one of check()'s withheld-reply notices (any reason variant). chat_service / model_orchestration use this to mark the outgoing message "system" rather than a "backend" persona turn.
     """
     return text.startswith(_FALLBACK_LEAD)
+
+
+def _has_rejection_evidence(violation: dict, response: str, history: list) -> bool:
+    """Style alone never blocks; contradictions need two distinct, sourced claims."""
+    category, quote = violation.get("category"), violation.get("quote")
+    if category not in _REJECT_RULES or category == "unnatural":
+        return False
+    if not isinstance(quote, str) or not quote.strip() or quote not in response:
+        return False
+    if category != "contradiction":
+        return True
+    other = violation.get("conflicting_quote")
+    if not isinstance(other, str) or not other.strip() or other in quote or quote in other:
+        return False
+    if violation.get("conflict_source") == "response":
+        return other in response
+    if violation.get("conflict_source") == "history":
+        return any(message.sender == Sender.BACKEND and other in message.text for message in history)
+    return False
 
 
 class ResponseGate:
@@ -216,9 +243,11 @@ class ResponseGate:
                                 "enum": list(_CATEGORIES)
                             },
                             "reason": {"type": "STRING"},
-                            "quote": {"type": "STRING"}
+                            "quote": {"type": "STRING"},
+                            "conflicting_quote": {"type": "STRING"},
+                            "conflict_source": {"type": "STRING", "enum": ["response", "history", "none"]},
                         },
-                        "required": ["category", "reason", "quote"]
+                        "required": ["category", "reason", "quote", "conflicting_quote", "conflict_source"]
                     }
                 }
             },
@@ -311,13 +340,13 @@ class ResponseGate:
             # spending a regeneration correcting a problem that doesn't exist.
             # Discarding is now per-violation: a single bad quote no longer
             # throws away the genuine problems reported alongside it.
-            grounded = [v for v in violations if v["quote"] and v["quote"] in current_response]
+            grounded = [v for v in violations if _has_rejection_evidence(v, current_response, context["recent_messages"])]
             discarded = [v for v in violations if v not in grounded]
             for v in discarded:
                 # The category is a fixed label; the reason and quote are the
                 # auditor's words about the reply, so they are trace-only.
                 logger.warning(
-                    "ResponseGate.check attempt %d/%d: dropped %s violation -- its quote isn't in the response.",
+                    "ResponseGate.check attempt %d/%d: dropped %s violation -- advisory or insufficient evidence.",
                     attempt + 1, regen_counter, v.get("category"),
                 )
                 trace.debug("response gate dropped violation reason=%r quote=%r", v.get("reason"), v.get("quote"))

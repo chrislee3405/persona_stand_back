@@ -133,9 +133,13 @@ def _record_usage(response) -> None:
     usage = getattr(response, "usage_metadata", None)
     if usage is None:
         return
+    def count(name):
+        value = getattr(usage, name, None)
+        return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
     turn_metrics.record_usage(
-        int(getattr(usage, "prompt_token_count", 0) or 0),
-        int(getattr(usage, "candidates_token_count", 0) or 0),
+        count("prompt_token_count"), count("candidates_token_count"),
+        thinking_tokens=count("thoughts_token_count"), cached_tokens=count("cached_content_token_count"),
+        total_tokens=count("total_token_count"),
     )
 
 
@@ -170,16 +174,17 @@ class GeminiService:
         Raises:
         - GeminiEmptyResponseError: the model returned no text at all (safety block, truncation). Never returns None despite the SDK being able to.
         """
-        response = await _get_client().aio.models.generate_content(
-            model=model_name,
-            contents=user_prompt,
-            config=types.GenerateContentConfig(
-                system_instruction=system_prompt,
-                max_output_tokens=_MAX_OUTPUT_TOKENS,
+        with turn_metrics.model_call(model_name):
+            response = await _get_client().aio.models.generate_content(
+                model=model_name,
+                contents=user_prompt,
+                config=types.GenerateContentConfig(
+                    system_instruction=system_prompt,
+                    max_output_tokens=_MAX_OUTPUT_TOKENS,
+                )
             )
-        )
-        _record_usage(response)
-        return _require_text(response, model_name)
+            _record_usage(response)
+            return _require_text(response, model_name)
 
     async def call_model_structured(self, model_name: str, user_prompt: str, system_prompt: str, schema: dict) -> JSONValue:
         """
@@ -198,15 +203,16 @@ class GeminiService:
         - GeminiEmptyResponseError: the model returned no text at all, so there is nothing to parse.
         - json.JSONDecodeError: the model returned text that is not valid JSON (a truncated payload does this). Callers that can degrade already catch broadly; see GroundingService.ground.
         """
-        response = await _get_client().aio.models.generate_content(
-            model=model_name,
-            contents=user_prompt,
-            config=types.GenerateContentConfig(
-                system_instruction=system_prompt,
-                response_mime_type="application/json",
-                response_schema=schema,
-                max_output_tokens=_MAX_OUTPUT_TOKENS,
+        with turn_metrics.model_call(model_name):
+            response = await _get_client().aio.models.generate_content(
+                model=model_name,
+                contents=user_prompt,
+                config=types.GenerateContentConfig(
+                    system_instruction=system_prompt,
+                    response_mime_type="application/json",
+                    response_schema=schema,
+                    max_output_tokens=_MAX_OUTPUT_TOKENS,
+                )
             )
-        )
-        _record_usage(response)
-        return json.loads(_require_text(response, model_name))
+            _record_usage(response)
+            return json.loads(_require_text(response, model_name))

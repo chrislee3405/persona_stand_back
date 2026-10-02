@@ -283,8 +283,8 @@ class SiteContent(Base):
     {
       "owner": "<string>",        ?   # name in the copyright line. Falls back
                                       #   to personal_statement."owner".
-      "note":  "<string>",        ?   # one short line beside it, e.g.
-                                      #   "Built with React, FastAPI and AWS".
+      "version": "<string>",      ?   # display release label, e.g. "v1.0.3".
+                                      #   Legacy "note" is no longer displayed.
       "links": [                  ?   # links on the right. Falls back to
         { "label": "<string>",         #   contact."links", so social links do
           "href":  "<string>" }        #   not have to be written twice.

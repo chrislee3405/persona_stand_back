@@ -6,6 +6,7 @@ from app.chat_trace import trace
 from app.constants import DEFAULT_MODEL
 from app.services.ai.gemini_service import GeminiService
 from app.services.model_collaborate.prepare_history import prepare_history
+from app.services.model_collaborate.role_context import role_context_section
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +51,12 @@ _GROUND_SYSTEM_PROMPT = (
     "something, when something happened.\n"
     "- \"behavioural\" how the candidate would ACT, what they value, their "
     "approach or opinion, or a hypothetical -- questions answerable from "
-    "character alone.\n"
+    "character and general reasoning, informed by the role when available. "
+    "For example, 'What would you prioritise learning to become effective in this position?' "
+    "asks for a proposed approach, not a documented personal learning plan: classify it "
+    "as behavioural even if no such plan is stored. 'What are you currently learning?' "
+    "and 'What learning plan have you committed to?' are factual. A past example "
+    "('Tell me about a time you learned a new tool') also requires factual evidence.\n"
     # Without this third value, ordinary chat had nowhere to go. "How are
     # you" asks nothing about the candidate's life and nothing about how they
     # would act, so it came back "factual" with coverage "none" -- and the
@@ -95,11 +101,16 @@ _GROUND_SYSTEM_PROMPT = (
     "alone. Explicit deadlines, milestones or a five-year destination need "
     "their own evidence; name those gaps when specifically requested.\n\n"
     "List in `facts` only what the material or the conversation actually "
-    "states, staying close to their wording. Do not add, infer, combine or "
-    "round anything -- above all not dates, years, durations or counts. If the "
+    "states, staying close to their wording. You may select facts from multiple "
+    "references and recognise their relevance to the question; this does not "
+    "authorise inferring new experience or combining separate facts into an "
+    "undocumented event or achievement. Do not invent or round details -- "
+    "above all not dates, years, durations or counts. If the "
     "material names something without describing it, the name is the fact; its "
     "details are not. For a behavioural question, include any facts that could "
-    "serve as a genuine example, or leave the list empty. For a conversational "
+    "serve as a genuine example, or leave the list empty. Leave `missing` empty for "
+    "a purely behavioural question; an unstored hypothetical answer is not a missing fact. "
+    "For a conversational "
     "turn leave `facts` empty, set `coverage` to \"none\" and leave `missing` "
     "empty -- nothing was asked, so nothing is missing.\n\n"
     # Reference rows often open with a CV-style header ("Master of X (AI) |
@@ -192,15 +203,21 @@ class GroundingService:
                 schema=_GROUND_RESPONSE_SCHEMA
             )
         except Exception:
-            logger.exception("Grounding call failed -- falling back to no available facts.")
+            logger.exception("Grounding call failed -- unable to verify supporting information.")
             grounding = None
 
-        if not isinstance(grounding, dict) or "question_type" not in grounding:
+        if (not isinstance(grounding, dict)
+                or grounding.get("question_type") not in ("factual", "behavioural", "conversational")
+                or grounding.get("coverage") not in ("full", "partial", "none")
+                or not isinstance(grounding.get("facts"), list)
+                or not all(isinstance(fact, str) for fact in grounding["facts"])
+                or not isinstance(grounding.get("missing"), str)):
             # The response itself is model output about the conversation, so
             # it goes to the trace logger; this line only says it happened.
-            logger.warning("Grounding returned no question_type/coverage -- treating as no facts.")
+            logger.warning("Grounding returned an invalid result -- marking verification failed.")
             trace.debug("grounding malformed response: %r", grounding)
             grounding = dict(GROUND_FALLBACK)
+            grounding["_failed"] = True
 
         logger.debug(
             "Grounding question_type=%s coverage=%s facts=%d",
@@ -240,4 +257,21 @@ class GroundingService:
             history_section=history_section,
             user_message=user_message,
         )
-        return _GROUND_SYSTEM_PROMPT, user_prompt
+        role_section = role_context_section(context.get("job_context"))
+        system_prompt = _GROUND_SYSTEM_PROMPT
+        if role_section:
+            user_prompt = role_section + user_prompt
+            system_prompt += (
+                "\nAn offered-role brief is supplied separately. Questions asking what the offered "
+                "position is or what it requires are factual: include directly stated role details in `facts`, "
+                "prefixed 'Offered role:'. For suitability questions, use the brief to identify "
+                "relevant candidate facts from the reference material. Do not substitute the "
+                "candidate's desired role for the offered position, or mark the position "
+                "unknown when the brief specifies it. Role requirements are never evidence "
+                "of candidate experience. Missing candidate evidence must remain missing. "
+                "Questions about how the candidate would learn, prepare, prioritise or approach "
+                "work in that position are behavioural, not factual requests for a stored plan. "
+                "Include relevant stated role requirements as 'Offered role:' facts to inform "
+                "that hypothetical answer; do not invent candidate commitments or experience."
+            )
+        return system_prompt, user_prompt

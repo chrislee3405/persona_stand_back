@@ -1,5 +1,6 @@
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -14,6 +15,51 @@ READINESS_CALL = "should reply YET"
 DOC_TOPICS = [("study", "what they studied")]
 SCENARIO_TOPICS = [("greeting", "how they open")]
 CANDIDATES = [{"question": "tell me about yourself", "answer": "I studied IT.", "score": 1.0}]
+
+
+@pytest.mark.parametrize("question,selected,expected", [
+    ("Which parts of your experience are relevant to this position?",
+     ["deployment", "release testing", "invented topic"], ["deployment", "release testing"]),
+    ("What is the weather tomorrow?", [], []),
+])
+async def test_retrieval_prompt_defers_fact_approval_and_preserves_topic_boundaries(question, selected, expected):
+    # Mock output verifies prompt delivery and filtering, not live relevance decisions.
+    from app.services.model_collaborate.role_context import role_context_section
+    client = SimpleNamespace(call_model_structured=AsyncMock(return_value={
+        "document_topics": selected, "scenario_topics": ["deployment"],
+    }))
+    gatherer, _ = build(gemini=client)
+    topics = [("deployment", "Docker and AWS deployment contributions"),
+              ("release testing", "CI/CD release verification")]
+    result = await gatherer._select_relevant_topics(
+        topics, [("teamwork", "collaboration")],
+        role_context_section("Role: Junior cloud engineer"), question)
+    assert result == (expected, [])
+    call = client.call_model_structured.await_args.kwargs
+    assert question in call["user_prompt"]
+    assert "Junior cloud engineer" in call["user_prompt"]
+    prompts = call["system_prompt"] + call["user_prompt"]
+    assert "likely to contain useful evidence" in prompts
+    assert "grounding will decide" in prompts
+    assert "Exclude clearly unrelated topics" in prompts
+    assert "highly confident" not in prompts
+    assert "When in doubt, leave it out" not in prompts
+    assert call["schema"]["properties"]["document_topics"]["items"]["enum"] == [t[0] for t in topics]
+
+
+@pytest.mark.parametrize("role", [None, "", "   ", "Role: Junior AI developer", "Role: Junior cloud engineer"])
+async def test_offered_role_reaches_topic_selection_and_example_reranking(role):
+    gemini = FakeGemini()
+    question = "Which experience is relevant to this position?"
+    gatherer, _ = build(gemini=gemini, conversations=FakeConversations(
+        pending=[message(0, "user", question)]))
+    await gatherer.gather(question, "conv", job_context=role)
+    for stage in ("topics", "example"):
+        prompt = gemini.prompts[stage]
+        assert ("Role context (quoted data" in prompt) == bool(role and role.strip())
+        if role and role.strip():
+            assert role in prompt
+            assert "never claims that the candidate has its required skills" in prompt
 
 
 class RecordingSession:

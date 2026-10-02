@@ -14,6 +14,7 @@ from app.services.conversation_manage_service import ConversationService, Conver
 from app.services.model_collaborate_service import ModelCollaborateService, TurnOutcome
 from app.services.model_collaborate.readiness_service import NO_REPLY, RESPOND
 from app.services.model_collaborate.response_gate import is_fallback_response
+from app.services.model_collaborate import turn_metrics
 from app.services.privacy_gate_service import PrivacyGateService
 from app.services.rate_control_service import RateControlService, RateTier, get_rate_control_service
 from app.services.model_collaborate.summarization_service import SummarizationService
@@ -219,12 +220,12 @@ class ChatService:
                 #       next prompt's history.
                 #       Any failure is recorded as a sender="error" review row.
                 try:
-                    outcome = await asyncio.wait_for(
+                    outcome = await self._run_measured_model(
                         self.model_service.model_orchestration(
                             user_text, conversation_id, session_id, tier,
                             **({"job_context": job_context} if tier == "invite" else {}),
                         ),
-                        timeout=TURN_DEADLINE_SECONDS,
+                        conversation_id, user_message.order_index, kind="message",
                     )
                 except Exception as exc:
                     return await self._handle_failed_turn(
@@ -311,7 +312,8 @@ class ChatService:
                     raise ConversationNotFoundError(conversation_id)
                 self.conversation_service.assert_ownership(conversation, session_id)
 
-                if not await self.conversation_service.get_pending_user_messages(conversation_id):
+                pending = await self.conversation_service.get_pending_user_messages(conversation_id)
+                if not pending:
                     logger.info(
                         "Continue for conversation_id=%s found nothing held -- no model call",
                         conversation_id,
@@ -325,12 +327,12 @@ class ChatService:
                     }
 
                 try:
-                    outcome = await asyncio.wait_for(
+                    outcome = await self._run_measured_model(
                         self.model_service.model_orchestration(
                             "", conversation_id, session_id, tier, skip_readiness=True,
                             **({"job_context": job_context} if tier == "invite" else {}),
                         ),
-                        timeout=TURN_DEADLINE_SECONDS,
+                        conversation_id, pending[-1].order_index, kind="continue",
                     )
                 except Exception as exc:
                     return await self._handle_failed_turn(
@@ -345,6 +347,30 @@ class ChatService:
         finally:
             self.rate_control_service.release_slot(session_id)
 
+    async def _run_measured_model(self, operation, conversation_id: str, order_index: int, *, kind: str):
+        # Outside wait_for: the recorder survives cancellation of the model task.
+        with turn_metrics.turn() as metrics:
+            status = "failed"
+            try:
+                outcome = await asyncio.wait_for(operation, timeout=TURN_DEADLINE_SECONDS)
+                status = outcome.decision
+                return outcome
+            except asyncio.TimeoutError:
+                status = "timeout"
+                raise
+            except asyncio.CancelledError:
+                status = "cancelled"
+                raise
+            finally:
+                try:
+                    await asyncio.wait_for(self.conversation_service.record_token_usage(
+                        conversation_id, order_index, metrics.snapshot(status=status, kind=kind),
+                    ), timeout=5)
+                except Exception:
+                    # Telemetry failure must not replace a valid reply or hide the original error.
+                    logger.exception("Could not persist token usage for conversation_id=%s run_id=%s",
+                                     conversation_id, metrics.run_id)
+
     async def _publish_outcome(self, outcome: TurnOutcome, conversation_id: str, code: str | None, session_id: str, background_tasks: BackgroundTasks) -> dict:
         """Return a reply only after its complete publication transaction commits."""
         reply_sender = Sender.SYSTEM if is_fallback_response(outcome.reply_text or "") else Sender.BACKEND
@@ -354,6 +380,7 @@ class ChatService:
             reply_text=outcome.reply_text, reply_sender=reply_sender,
             selected_document=_join_topics(outcome.doc_topics),
             selected_scenario=_join_topics(outcome.scenario_topics),
+            system_notice=outcome.system_notice,
         )
         if status != RESPOND:
             return {"turns": [], "sender": Sender.SYSTEM, "status": status,
@@ -363,6 +390,7 @@ class ChatService:
             conversation_id=conversation_id,
         )
         return {"turns": outcome.reply_turns, "sender": reply_sender, "status": RESPOND,
+                **({"systemNotice": outcome.system_notice} if outcome.system_notice and reply_sender == Sender.BACKEND else {}),
                 "conversationId": conversation_id, "userMessageKept": reply_sender != Sender.SYSTEM}
 
     async def _discard_pending_group(self, conversation_id: str | None, session_id: str) -> None:

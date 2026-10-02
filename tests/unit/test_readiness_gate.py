@@ -42,7 +42,8 @@ class FakeGatherer:
         self.calls = 0
         self.skip_readiness = None
 
-    async def gather(self, user_message, conversation_id, skip_readiness=False):
+    async def gather(self, user_message, conversation_id, skip_readiness=False, job_context=None):
+        self.job_context = job_context
         self.calls += 1
         self.skip_readiness = skip_readiness
         return {
@@ -102,6 +103,53 @@ async def test_respond_runs_the_whole_pipeline():
     assert service.response_parser.parse.calls == 1
 
 
+@pytest.mark.parametrize("coverage", ["none", "full"])
+async def test_no_facts_returns_persona_reply_and_separate_notice(coverage):
+    service = build_model_service()
+    service.grounding_service.ground.result = {
+        "question_type": "factual", "coverage": coverage, "facts": [" "],
+        "missing": "five-year career plans",
+    }
+    outcome = await service.model_orchestration("plans?", "conv-1", "sess-1", "guest")
+    assert outcome.reply_turns == ["I don't have that information for now."]
+    assert "five-year career plans" in outcome.system_notice
+    assert "contact Chris" in outcome.system_notice
+    assert service._generate_reply.calls == service.response_gate.check.calls == service.response_parser.parse.calls == 0
+
+
+@pytest.mark.parametrize("kind,facts", [("factual", ["Supported fact"]), ("behavioural", []), ("conversational", [])])
+async def test_partial_or_nonfactual_reply_has_no_system_referral(kind, facts):
+    service = build_model_service()
+    service.grounding_service.ground.result = {
+        "question_type": kind, "coverage": "partial", "facts": facts, "missing": "a detail",
+    }
+    outcome = await service.model_orchestration("hello", "conv-1", "sess-1", "guest")
+    assert outcome.system_notice is None
+    assert service._generate_reply.calls == 1
+
+
+async def test_failed_grounding_is_not_reported_as_missing_facts():
+    service = build_model_service()
+    service.grounding_service.ground.result = {"_failed": True}
+    with pytest.raises(RuntimeError, match="Unable to verify"):
+        await service.model_orchestration("hello", "conv-1", "sess-1", "guest")
+
+
+async def test_notice_is_returned_only_after_successful_publication():
+    from unittest.mock import AsyncMock
+    outcome = TurnOutcome(decision="respond", evaluated_through=0, reply_text="No information.",
+                          reply_turns=["No information."], system_notice="Contact Chris about plans.")
+    service = build_chat_service(outcome)
+    service.conversation_service.publish_turn = AsyncMock(return_value="respond")
+    result = await service._publish_outcome(outcome, "conv-1", None, "sess-1", FakeBackgroundTasks())
+    assert result["systemNotice"] == outcome.system_notice
+    assert result["sender"] == "backend" and result["userMessageKept"] is True
+    assert service.conversation_service.publish_turn.call_args.kwargs["system_notice"] == outcome.system_notice
+    service.conversation_service.publish_turn.return_value = "superseded"
+    result = await service._publish_outcome(outcome, "conv-1", None, "sess-1", FakeBackgroundTasks())
+    assert "systemNotice" not in result and result["turns"] == []
+
+
 @pytest.mark.parametrize("decision", ["wait", "no_reply"])
 async def test_non_respond_skips_grounding_generation_verification_and_splitting(decision):
     service = build_model_service(decision=decision, evaluated_through=2)
@@ -139,6 +187,9 @@ async def test_the_pending_group_is_what_gets_grounded():
 
 
 class FakeConversationService:
+    async def record_token_usage(self, conversation_id, order_index, run):
+        self.usage_runs = [*getattr(self, "usage_runs", []), run]
+
     def __init__(self, latest_user_index=0):
         self.latest_user_index = latest_user_index
         self.appended = []

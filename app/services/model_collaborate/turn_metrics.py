@@ -16,6 +16,8 @@ cancelled simply stops recording.
 
 import logging
 import time
+import uuid
+from datetime import datetime, timezone
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -24,6 +26,7 @@ logger = logging.getLogger(__name__)
 
 _current: ContextVar["TurnMetrics | None"] = ContextVar("turn_metrics", default=None)
 _current_stage: ContextVar[str | None] = ContextVar("turn_metrics_stage", default=None)
+_current_call: ContextVar[dict | None] = ContextVar("turn_metrics_call", default=None)
 
 
 @dataclass
@@ -34,6 +37,7 @@ class StageMetrics:
     seconds: float = 0.0
     prompt_tokens: int = 0
     output_tokens: int = 0
+    requests: list[dict] = field(default_factory=list)
 
     @property
     def total_tokens(self) -> int:
@@ -46,6 +50,26 @@ class TurnMetrics:
 
     decision: str | None = None
     stages: dict[str, StageMetrics] = field(default_factory=dict)
+    run_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    started_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+    def snapshot(self, *, status: str, kind: str) -> dict:
+        """Provider counts only; unknown usage is null, never a fabricated zero."""
+        fields = ("input_tokens", "output_tokens", "thinking_tokens", "cached_tokens", "total_tokens")
+
+        def totals(requests):
+            return {key: (sum(r[key] for r in requests) if all(r.get(key) is not None for r in requests) else None)
+                    for key in fields}
+
+        requests = [r for stage in self.stages.values() for r in stage.requests]
+        return {
+            "run_id": self.run_id, "started_at": self.started_at, "kind": kind,
+            "status": status, "decision": self.decision,
+            "stages": {name: {"seconds": round(stage.seconds, 4), "calls": len(stage.requests),
+                              "tokens": totals(stage.requests), "requests": [dict(r) for r in stage.requests]}
+                       for name, stage in self.stages.items()},
+            "total": totals(requests),
+        }
 
     def stage(self, name: str) -> StageMetrics:
         return self.stages.setdefault(name, StageMetrics())
@@ -126,13 +150,13 @@ def stage(name: str):
         yield
     finally:
         entry = metrics.stage(name)
-        entry.calls += 1
         entry.seconds += time.perf_counter() - started
         _current_stage.reset(token)
 
 
 
-def record_usage(prompt_tokens: int, output_tokens: int) -> None:
+def record_usage(prompt_tokens: int | None, output_tokens: int | None, *, thinking_tokens=None,
+                 cached_tokens=None, total_tokens=None) -> None:
     """
     Adds one Gemini call's token usage to whichever stage is currently open.
 
@@ -148,8 +172,33 @@ def record_usage(prompt_tokens: int, output_tokens: int) -> None:
     if metrics is None or name is None:
         return
     entry = metrics.stage(name)
-    entry.prompt_tokens += prompt_tokens
-    entry.output_tokens += output_tokens
+    entry.prompt_tokens += prompt_tokens or 0
+    entry.output_tokens += output_tokens or 0
+    request = _current_call.get()
+    if request is not None:
+        request.update(input_tokens=prompt_tokens, output_tokens=output_tokens,
+                       thinking_tokens=thinking_tokens, cached_tokens=cached_tokens, total_tokens=total_tokens)
+
+
+@contextmanager
+def model_call(model: str):
+    """Count each application call, including retries and calls that fail without usage."""
+    metrics, name = _current.get(), _current_stage.get()
+    if metrics is None or name is None:
+        yield
+        return
+    request = {"model": model, "status": "failed", "input_tokens": None, "output_tokens": None,
+               "thinking_tokens": None, "cached_tokens": None, "total_tokens": None}
+    metrics.stage(name).calls += 1
+    metrics.stage(name).requests.append(request)
+    token = _current_call.set(request)
+    started = time.perf_counter()
+    try:
+        yield
+        request["status"] = "completed"
+    finally:
+        request["seconds"] = round(time.perf_counter() - started, 4)
+        _current_call.reset(token)
 
 
 def set_decision(decision: str) -> None:

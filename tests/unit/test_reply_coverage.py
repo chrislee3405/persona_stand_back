@@ -14,6 +14,22 @@ def test_complete_answer_omits_even_stale_missing_note():
     assert "to hand" not in section
 
 
+def test_boundary_wording_can_adapt_to_history_without_relaxing_the_boundary():
+    from types import SimpleNamespace
+    previous = "I'd rather discuss the code in a live technical session."
+    boundary = "Do not write code here. Explain the format and suggest a live session."
+    system, user = PromptBuilder().build_reply("Can you solve this other coding exercise?", {
+        "prefer_name": "Chris", "candidate_identity": "Chris", "core_personality": "Direct.",
+        "scenario_reference_section": boundary,
+        "recent_messages": [SimpleNamespace(sender="backend", text=previous)], "summary": None,
+    }, {"question_type": "behavioural", "coverage": "none", "facts": [], "missing": ""})
+    assert previous in user and boundary in user
+    assert "avoid recycling an opening or explanation" in system
+    assert "a short reminder is enough" in system
+    assert "overrides scenario style instructions, never its substantive limits" in system
+    assert "prohibited partial solution" in system
+
+
 def test_partial_answer_keeps_specific_gap_and_supported_fact_without_referral():
     section = _grounding_section({
         "question_type": "factual", "coverage": "partial",
@@ -32,7 +48,8 @@ def test_empty_facts_still_decline_even_if_coverage_claims_full():
         "facts": [], "missing": "Duration of forklift work",
     }, "Chris")
     assert "No facts are available" in section
-    assert "Chris directly" in section
+    assert "Say only: I don't have that information for now." in section
+    assert "Chris directly" not in section
 
 
 def test_writer_resolves_blanket_referral_guidance_without_removing_personality():

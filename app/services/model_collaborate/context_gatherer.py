@@ -14,6 +14,7 @@ from app.services.bm25_service import BM25Service
 from app.services.conversation_manage_service import ConversationService
 from app.services.model_collaborate import turn_metrics
 from app.services.model_collaborate.prepare_history import prepare_history
+from app.services.model_collaborate.role_context import role_context_section
 from app.services.model_collaborate.readiness_service import (
     CONTINUE_NOTHING_HELD,
     CONTINUE_VERDICT,
@@ -64,11 +65,20 @@ _FIND_TOPIC_SYSTEM_PROMPT = (
     "kind of question.\n"
     "Judge the two lists separately. A message may need topics from both, from "
     "one, or from neither.\n\n"
-    "Be conservative: only select a topic if you are highly confident it is "
-    "directly relevant to answering the current message -- a loose, "
-    "tangential, or merely thematically-similar connection is not enough. "
-    "If no topic in a list clears that bar, return an empty array for that "
-    "list rather than guessing or including a weak match.\n\n"
+    "Retrieve a small, focused set of topics likely to contain useful evidence "
+    "or guidance. This is retrieval, not factual approval: grounding will "
+    "decide which retrieved facts actually support the answer. Use conversation "
+    "context and any offered-role brief to resolve indirect references. For "
+    "broad experience or suitability questions, include relevant skills, "
+    "projects and contributions even when the user does not name them. "
+    "For example, a cloud-role suitability question can need deployment, "
+    "release-testing and database-reliability references. A topic need not "
+    "answer the whole question by itself. Do not reject plausible supporting "
+    "evidence merely because relevance requires connecting it to the question. "
+    "Exclude clearly unrelated topics and redundant selections. Do not fetch "
+    "role-related material for an unrelated question merely because a brief "
+    "is present. Return an empty array for a list when none of its topics "
+    "could reasonably help.\n\n"
     "Return only exact topic strings, each from the list it belongs to -- "
     "never invent a topic, and never return a topic under the other list."
 )
@@ -80,10 +90,10 @@ _FIND_TOPIC_USER_PROMPT_TEMPLATE = (
     "{scenario_topic_descriptions}\n\n"
     "{history_context}"
     "Current user message: {user_message}\n\n"
-    "Using the conversation history strictly as context to understand "
-    "references (not as a source of topics on its own), select only the "
-    "topic(s) you are highly confident are directly relevant to answering "
-    "the current message. When in doubt, leave it out."
+    "Use the history and offered-role brief, if present, to interpret the "
+    "current question. Select a focused set likely to provide supporting "
+    "evidence or guidance; exclude clearly unrelated topics. Leave factual "
+    "approval to grounding rather than requiring certainty at retrieval."
 )
 
 _SELECT_EXAMPLE_SYSTEM_PROMPT = (
@@ -162,7 +172,7 @@ class ContextGatherer:
         self.conversation_service = conversation_service
         self.readiness_service = readiness_service or ReadinessService(gemini_service)
 
-    async def gather(self, user_message: str, conversation_id: str, skip_readiness: bool = False) -> dict:
+    async def gather(self, user_message: str, conversation_id: str, skip_readiness: bool = False, job_context: str | None = None) -> dict:
         """
         Collects DB references, similar past questions, and conversation history needed to build a prompt.
 
@@ -278,11 +288,14 @@ class ContextGatherer:
         topics_task = asyncio.ensure_future(
             self._select_relevant_topics(
                 doc_topics_data, scenario_topics_data,
-                _topic_history_context(recent_messages), effective_user_message,
+                role_context_section(job_context) + _topic_history_context(recent_messages), effective_user_message,
             )
         )
         example_task = asyncio.ensure_future(
-            self._select_relevant_example(bm25_candidates, recent_messages, effective_user_message)
+            self._select_relevant_example(
+                bm25_candidates, recent_messages, effective_user_message,
+                **({"job_context": job_context} if job_context else {}),
+            )
         )
         tasks = (readiness_task, topics_task, example_task)
         try:
@@ -514,7 +527,7 @@ class ContextGatherer:
 
     # --- Similar-example re-rank ---
 
-    async def _select_relevant_example(self, candidates: list[dict], recent_messages: list | None, user_message: str) -> list[dict]:
+    async def _select_relevant_example(self, candidates: list[dict], recent_messages: list | None, user_message: str, job_context: str | None = None) -> list[dict]:
         """
         Asks Gemini which BM25 candidate (if any) matches the current message in meaning, guarding against keyword-overlap false positives.
 
@@ -543,7 +556,7 @@ class ContextGatherer:
 
         user_prompt = _SELECT_EXAMPLE_USER_PROMPT_TEMPLATE.format(
             candidates=candidates_str,
-            history_context=history_context,
+            history_context=role_context_section(job_context) + history_context,
             user_message=user_message
         )
 
@@ -584,7 +597,7 @@ class ContextGatherer:
 
     async def _select_relevant_topics(self, doc_topics_data: list[tuple[str, str]], scenario_topics_data: list[tuple[str, str]], history_context: str, user_message: str) -> tuple[list[str], list[str]]:
         """
-        Asks Gemini, in one call, to conservatively select which document and scenario topics are relevant to the user's message.
+        Asks Gemini, in one call, for a focused set of potentially useful document and scenario topics; grounding approves the evidence later.
 
         Parameters:
         - doc_topics_data (list[tuple[str, str]]): (topic, description) pairs for factual document references — comes from _find_topic

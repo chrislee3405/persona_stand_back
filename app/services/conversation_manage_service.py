@@ -1,7 +1,7 @@
 import uuid
 
 from fastapi import Depends
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select, update, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.constants import GUEST_CODE, NON_PROMPT_SENDERS, Sender
@@ -301,10 +301,29 @@ class ConversationService:
         if commit:
             await self.db.commit()
 
+    async def record_token_usage(self, conversation_id: str, order_index: int, run: dict) -> None:
+        """Append one measured run without overwriting concurrent runs or creating chat rows."""
+        await self.db.rollback()
+        async with self.db.begin():
+            await self.db.execute(text("SET LOCAL lock_timeout = '2s'"))
+            await self.db.execute(text("SET LOCAL statement_timeout = '3s'"))
+            model = conversation_models.Message
+            row = (await self.db.execute(select(model.message_id, model.token_usage).where(
+                model.conversation_id == conversation_id, model.order_index == order_index,
+            ).with_for_update())).one_or_none()
+            if row is None:  # Conversation may have been removed; never recreate it for telemetry.
+                return
+            usage = row.token_usage or {"schema_version": 1, "runs": []}
+            if any(item["run_id"] == run["run_id"] for item in usage["runs"]):
+                return
+            await self.db.execute(update(model).where(model.message_id == row.message_id).values(
+                token_usage={**usage, "runs": [*usage["runs"], run]},
+            ))
+
     async def publish_turn(self, *, conversation_id: str, session_id: str, code: str | None,
                            evaluated_through: int, decision: str, reply_text: str | None,
                            reply_sender: str, selected_document: str | None = None,
-                           selected_scenario: str | None = None) -> str:
+                           selected_scenario: str | None = None, system_notice: str | None = None) -> str:
         """Publish one evaluated group atomically, rechecking ownership and ordering.
 
         Model work has finished. End its read transaction, then lock only for the
@@ -331,6 +350,10 @@ class ConversationService:
                     selected_scenario=selected_scenario, selected_document=selected_document,
                     commit=False,
                 )
+                if system_notice and reply_sender == Sender.BACKEND:
+                    await self.append_message(
+                        conversation_id, code, session_id, Sender.SYSTEM, system_notice, commit=False,
+                    )
                 if reply_sender == Sender.SYSTEM:
                     await self.db.execute(
                         update(conversation_models.Message).where(

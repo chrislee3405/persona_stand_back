@@ -1,3 +1,62 @@
+# Per-turn token usage (v1.0.3)
+
+Before deploying the new backend, open `20261002_message_token_usage.sql` in
+pgAdmin's Query Tool connected to the application's RDS database and execute the
+whole file. It adds nullable `message.token_usage` JSONB without changing existing
+messages. Run `ROLLBACK;` first if a previous Query Tool operation left a failed
+transaction. The migration uses a five-second lock timeout; if the table is busy,
+retry the whole file during a quiet period. It is safe to rerun and preserves
+already-recorded usage. An incompatible existing column causes a rollback.
+
+Check the migration:
+
+```sql
+SELECT column_name, data_type, is_nullable
+FROM information_schema.columns
+WHERE table_schema = current_schema() AND table_name = 'message'
+  AND column_name = 'token_usage';
+-- Expected: token_usage | jsonb | YES
+```
+
+Deploy the backend after this succeeds. Startup and `/api/health/ready` reject
+an existing database without the correct column. Fresh databases get the column
+through normal model schema creation. Rolling back the application does not
+require dropping the column; older code ignores it. No reseeding is needed.
+
+After a chat turn, inspect the triggering **user** row (including a row retagged
+`not_saved_user` after failure). No usage is duplicated onto persona fragments,
+system notices or regeneration review rows:
+
+```sql
+SELECT message_id, conversation_id, order_index, token_usage
+FROM message WHERE token_usage IS NOT NULL
+ORDER BY message_id DESC LIMIT 20;
+```
+
+The object has `schema_version: 1` and a `runs` array. Each run has a unique ID,
+UTC start time, kind (`message`, `continue`, `summary`), generation status,
+readiness decision, stage timings and per-request model/counts. Continuations
+append to the last held user message; background summaries append to the last
+included user message. Runs are recorded before reply publication, so a response
+later superseded or failing publication still has its model usage recorded.
+The run's status describes generation, not successful delivery to the browser.
+
+Input, visible output, thinking, cached and provider-total tokens are stored
+separately. Cached tokens are a subset of input: do not add them to input again.
+Provider totals are authoritative; missing counts remain `null`, not zero. A
+stage/turn aggregate is `null` when any request lacks that count; the per-request
+records retain the available counts. Empty/skipped work consumes zero known
+tokens. Application retries each have a request record; retries hidden inside
+the SDK, provider usage not returned after network failure, process termination
+and database write failures cannot be measured reliably by this mechanism.
+This is operational usage telemetry, not an invoice reconciliation system.
+
+Usage contains no prompt or reply text. It is excluded from prompts and API
+responses and is not loaded with ordinary message queries. Writes are bounded,
+best effort and separate from reply publication so logging errors do not discard
+a valid reply. Concurrent runs append under a row lock and duplicate run IDs are
+ignored. Historical messages stay `NULL` because their usage cannot be recovered.
+
 # Asset table rename
 
 `20260917_site_media.sql` renames `site_image` to `site_media` and `image_path`

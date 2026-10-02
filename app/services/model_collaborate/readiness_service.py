@@ -44,25 +44,29 @@ _READINESS_SYSTEM_PROMPT = (
     "Choose one `decision`:\n"
     "- \"respond\"  the group is something to answer now: a question, a "
     "request, a statement inviting a response, or a complete thought of any "
-    "kind. This is the DEFAULT -- choose it unless one of the two below "
-    "clearly applies.\n"
-    "- \"wait\"     the interviewer is visibly mid-thought and the group is "
-    "not yet answerable: it breaks off unfinished (\"and the other thing I "
-    "wanted to ask\"), or explicitly says more is coming (\"one sec\", "
-    "\"hold on, let me check something\", \"two questions, first...\"). "
-    "Answering now would cut them off.\n"
+    "kind, with no indication the interviewer is still composing that thought.\n"
+    "- \"wait\"     the group appears to be part of an unfinished thought, "
+    "or the interviewer signals more is coming. An explicit request to pause "
+    "is not required: an unfinished clause, setup without the actual question, "
+    "promised list or missing comparison can be enough. Judge the whole group "
+    "with the history. Being able to guess an answer to one part does not make "
+    "the group ready when the rest is evidently still coming.\n"
     "- \"no_reply\" the group closes the exchange or asks for nothing at all, "
     "so a reply would be noise: a bare acknowledgement (\"ok\", \"got it\", "
     "\"cool thanks\"), or a sign-off already answered (\"bye\" after the "
     "candidate has said goodbye).\n\n"
-    # Both non-respond decisions are silent from the visitor's side: nothing
-    # comes back. That is cheap when they are right and unsettling when they
-    # are wrong, so the bar is deliberately asymmetric.
-    "WHEN IN DOUBT, CHOOSE \"respond\". The other two answer with silence, "
-    "which a visitor cannot tell apart from a broken chat. A greeting "
+    # The client continues held messages after an idle timeout. Permit a
+    # short wait for a likely fragment without withholding complete questions.
+    "When the message plausibly continues an unfinished thought, prefer a "
+    "brief \"wait\" over interrupting with a guessed answer. Do not require "
+    "certainty that another message will arrive. A standalone complete request "
+    "should still receive \"respond\"; mere brevity, typos, missing punctuation "
+    "or non-native grammar alone do not make it a fragment. A greeting "
     "(\"hi\", \"how are you\") is a turn in the conversation and is always "
-    "\"respond\" -- never \"no_reply\". A question is always \"respond\", "
-    "even if it looks like more might follow.\n\n"
+    "\"respond\" -- never \"no_reply\". A completed follow-up that supplies "
+    "the missing part makes the group ready; do not keep waiting because its "
+    "earlier messages were fragments. Uncertainty about "
+    "the answer or available facts belongs to later stages, not readiness.\n\n"
     "Give a short `reason` -- one clause, for the log, not for the visitor."
 )
 

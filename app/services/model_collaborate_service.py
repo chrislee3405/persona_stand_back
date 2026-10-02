@@ -69,6 +69,7 @@ class TurnOutcome:
     reply_turns: list[str] = field(default_factory=list)
     doc_topics: list[str] = field(default_factory=list)
     scenario_topics: list[str] = field(default_factory=list)
+    system_notice: str | None = None
 
 
 class ModelCollaborateService:
@@ -102,7 +103,7 @@ class ModelCollaborateService:
         - session_id (str): the caller's session — comes from conversations_router, needed by ResponseGate to persist regen/fallback review rows via ConversationService.append_message
         - tier (RateTier): "guest" or "invite" — comes from ChatService.handle_chat_turn, selects which cap in _REGEN_COUNTER applies
         - skip_readiness (bool): True for ChatService.handle_continue_turn — answer the held group without asking the readiness gate again (see ContextGatherer.gather)
-        - job_context (str | None): current verified invite's description; used only by the invite reply writer, never as grounding evidence
+        - job_context (str | None): current verified invite's description; guides retrieval and supplies offered-role facts, never candidate experience
 
         Returns:
         - TurnOutcome: the decision, how far it evaluated, and (only for "respond") the reply text, its display turns and the selected topics — goes to ChatService.handle_chat_turn, which persists the reply, advances the handled cursor and shapes the response body
@@ -117,7 +118,12 @@ class ModelCollaborateService:
         with turn_metrics.turn() as metrics:
             # 1. Gather all necessary references and history, and ask whether
             #    the visitor's pending messages should be answered yet.
-            context = await self.context_gatherer.gather(user_message, conversation_id, skip_readiness=skip_readiness)
+            role = job_context.strip() if tier == "invite" and isinstance(job_context, str) else ""
+            context = await self.context_gatherer.gather(
+                user_message, conversation_id, skip_readiness=skip_readiness,
+                **({"job_context": role} if role else {}),
+            )
+            context = {**context, "job_context": role or None}
             readiness = context["readiness"]
             decision = readiness["decision"]
             evaluated_through = context["evaluated_through"]
@@ -148,10 +154,26 @@ class ModelCollaborateService:
             with turn_metrics.stage("grounding"):
                 grounding = await self.grounding_service.ground(effective_message, context)
 
+            if grounding.get("_failed"):
+                # Use the existing technical-error path, not a claim that facts are absent.
+                raise RuntimeError("Unable to verify supporting information")
+            facts = [fact for fact in grounding.get("facts", []) if isinstance(fact, str) and fact.strip()]
+            if grounding.get("question_type") == "factual" and not facts:
+                missing = grounding.get("missing")
+                subject = " ".join(missing.split())[:300] if isinstance(missing, str) and missing.strip() else "this question"
+                name = context.get("prefer_name") or "Chris"
+                reply = "I don't have that information for now."
+                return TurnOutcome(
+                    decision=RESPOND, evaluated_through=evaluated_through,
+                    pending_messages=context["pending_messages"],
+                    reply_text=reply, reply_turns=[reply],
+                    doc_topics=context["doc_topic_list"], scenario_topics=context["scenario_topic_list"],
+                    system_notice=(f"No supporting information was found in the available records about {subject}. "
+                                   f"Please contact {name} directly for a more detailed conversation."),
+                )
+
             # 3. Stage 2 -- write the reply from the approved facts only.
-            # Role requirements are not candidate evidence. Add them only after
-            # grounding, from the current verified invite, never conversation attribution.
-            context = {**context, "job_context": job_context if tier == "invite" else None}
+            # Grounding distinguishes offered-role facts from candidate evidence.
             system_prompt, user_prompt = self.prompt_builder.build_reply(effective_message, context, grounding)
             with turn_metrics.stage("reply"):
                 ai_response = await self._generate_reply(system_prompt, user_prompt)

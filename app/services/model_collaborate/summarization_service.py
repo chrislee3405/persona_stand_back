@@ -1,4 +1,5 @@
 import logging
+import asyncio
 
 from fastapi import Depends
 
@@ -7,6 +8,7 @@ from app.database import SessionLocal
 from app.services.conversation_manage_service import ConversationService
 from app.services.ai.gemini_service import GeminiService
 from app.services.model_collaborate.prepare_history import prepare_history
+from app.services.model_collaborate import turn_metrics
 
 logger = logging.getLogger(__name__)
 
@@ -138,11 +140,26 @@ class SummarizationService:
         if len(recent_messages) < RECENT_MESSAGES_BEFORE_SUMMARIZE:
             return
 
-        await self.summarize_conversation(
-            conversation_id=conversation_id,
-            summary=summary,
-            recent_messages=recent_messages
-        )
+        # Background summaries have their own run, attached to the last included
+        # user message. They must not overwrite that message's chat-turn usage.
+        anchor = next((m for m in reversed(recent_messages) if m.sender == "user"), recent_messages[-1])
+        with turn_metrics.turn() as metrics:
+            status = "failed"
+            try:
+                with turn_metrics.stage("summary"):
+                    await self.summarize_conversation(
+                        conversation_id=conversation_id, summary=summary, recent_messages=recent_messages,
+                    )
+                status = "completed"
+            finally:
+                try:
+                    async with SessionLocal() as usage_session:
+                        await asyncio.wait_for(ConversationService(usage_session).record_token_usage(
+                            conversation_id, anchor.order_index,
+                            metrics.snapshot(status=status, kind="summary"),
+                        ), timeout=5)
+                except Exception:
+                    logger.exception("Could not persist summary token usage for conversation_id=%s", conversation_id)
 
     async def summarize_conversation(self, conversation_id: str, summary: str | None, recent_messages: list) -> None:
         """

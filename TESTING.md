@@ -103,3 +103,20 @@ Stable fictional browser fixtures:
 
 These checks verify application behavior. Real-model answer quality evaluations
 remain a separate, explicitly triggered process.
+
+## Shared release marker
+
+For each release candidate, put the same `RELEASE_VERSION` in the frontend,
+backend and ec2yml repositories (initially `1.0.3-rc.1`). Commit and push both
+applications, even if one changes only its marker. Independent tests must pass
+before publication. Images carry version/source/revision labels and both
+`sha-FULL_COMMIT` and `release-MARKER` tags. Publication jobs are serialized;
+a marker cannot be reused for a different commit. Use `.2`, `.3`, etc. for new
+candidate builds; same-commit reruns reuse the original image.
+
+Push the matching marker and version log to ec2yml main. Its workflow waits up
+to 30 minutes for both matching images and resolves their digests/revisions
+without copying values or falling back to an older tag. CI installs dependencies
+and validates the selection. Approval, unchanged ECR promotion and digest-based
+EC2 deployment still follow Part C.0 in ec2yml. The candidate suffix does not
+change the public app version stored in the database.
