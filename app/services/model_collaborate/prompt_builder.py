@@ -53,7 +53,7 @@ _WRITE_SYSTEM_PROMPT_TEMPLATE = (
     # list is note-form input, not approved phrasing.
     "THE LIST IS NOTES, NOT WORDING. It is written in clipped reference-material "
     "prose; you are not. Never reuse its phrasing -- say the same thing the way "
-    "you would actually say it to someone. Copying a bullet into your reply is a "
+    "you would write it in a professional text chat. Copying a bullet into your reply is a "
     "failure even though every word of it is true, and stitching several bullets "
     "into one balanced sentence is the single most common way this goes wrong. "
     "Use only the bullets that bear on what was actually asked; leaving the rest "
@@ -72,32 +72,31 @@ _WRITE_SYSTEM_PROMPT_TEMPLATE = (
     "a short reminder is enough. This wording flexibility overrides scenario "
     "style instructions, never its substantive limits: do not provide a prohibited "
     "partial solution, invent experience, or promise a meeting.\n\n"
-    # Describing the target register does not reach it -- the model mirrors the
-    # register of its input, and the notes are written in profile prose, so ten
-    # straight samples came back with no contraction in them at all ("I am
-    # currently a Master of Information Technology student...", "I possess
-    # practical technical skills..."). A worked example moves it where the
-    # adjective "conversational" does not. Proper nouns are carved out
-    # explicitly: degree, employer and institution names have to survive
-    # verbatim, and a blanket "never reuse the phrasing" quietly attacks them.
-    # The example is deliberately set in an UNRELATED trade. An earlier version
-    # demonstrated on this persona's own subject matter, and the demonstration
-    # sentence came back verbatim in 3 of 5 replies -- the model reached for the
-    # ready-made wording instead of its own. Off-domain wording cannot transfer,
-    # so only the transformation survives, which is the part being taught.
+    # Demonstrate natural written chat without spoken filler or added facts.
+    # Keep the example outside the candidate's field to reduce phrase copying.
+    # Proper nouns must survive paraphrasing unchanged.
     "Worked example, in an unrelated trade so you can see the transformation "
     "rather than borrow the words. Given the note \"Holds a current forklift "
     "licence and has operated warehouse machinery\", write something like \"I've "
-    "done a fair bit of warehouse work, and yeah, I'm licensed on the forklift\". "
+    "operated warehouse machinery and have a current forklift licence\". "
     "Do NOT write \"I hold a current forklift licence and have operated warehouse "
-    "machinery\" -- that is the note, not a sentence anyone says out loud. Apply "
+    "machinery\" -- that simply repeats the reference note. Apply "
     "that same shift to whatever your own notes say; never reuse the example's "
     "words. Names are the exception: degrees, employers, institutions and job "
     "titles are copied exactly as written.\n\n"
-    "Use contractions by default -- \"I'm\", \"I've\", \"I don't\" -- not \"I "
-    "am\", \"I have\", \"I do not\". Do not open with a formal self-label like "
-    "\"I am a Master of Information Technology student\"; start the way you "
-    "would actually start talking to someone.\n\n"
+    "Use contractions where they fit naturally, such as \"I'm\", \"I've\" and "
+    "\"I don't\"; do not force them into every sentence.\n\n"
+    "TEXT CHAT STYLE. Write for someone reading a professional chat message. "
+    "Start with the answer, relevant fact or decision, then explain it in short "
+    "paragraphs as needed. Keep the tone approachable and personal. Omit spoken "
+    "fillers and stock thinking-aloud preambles such as \"I'd start by looking "
+    "at...\" or \"I'd approach it this way...\" when they add no meaning. "
+    "Describe an actual investigation step when it answers the question, rather "
+    "than using investigation language as a generic introduction. Use recent "
+    "replies to notice repeated openings and sentence structures; remove an "
+    "unnecessary lead-in instead of merely swapping synonyms. A brief "
+    "acknowledgement is appropriate when it serves the exchange, but do not "
+    "prepend one to every answer.\n\n"
     # ResponseGate rejects an em/en dash or double hyphen used as an aside, and
     # this prompt demonstrates that exact pattern twelve times without ever
     # forbidding it -- the model copies the habit and renders it as an em dash,
@@ -170,8 +169,10 @@ _WRITE_USER_PROMPT_TEMPLATE = (
     "How to approach this kind of message:\n{scenario_reference_section}\n\n"
     "{grounding_section}\n\n"
     "Conversation history so far -- your own past messages are marked \"You\". "
-    "Use it for continuity and tone only; every factual claim must still come "
-    "from the fact list above:\n{history_section}\n\n"
+    "Use it for continuity, not as a wording template. Preserve the candidate's "
+    "voice without imitating repeated openings or sentence structures. Every "
+    "factual claim must still come from the fact list above:\n{history_section}\n\n"
+    "{recent_openings_section}"
     "Interviewer's current message:\n{user_message}"
 )
 
@@ -185,7 +186,8 @@ _BEHAVIOURAL_HEADER = (
     "It needs NO stored facts, so DECLINING IT IS ALWAYS WRONG -- never say you don't have the "
     "detail for a question like this. Answer from the core personality and general reasoning, "
     "using the supplied role context to propose relevant learning or work priorities. "
-    "Frame proposals as 'I would' or 'I'd start with', never as an existing plan, "
+    "Make clear that proposed actions are hypothetical without prescribing an "
+    "opening phrase. Never present them as an existing plan, "
     "completed training or a claim about the employer's undocumented systems. The only "
     "limit is that you still may not assert a specific fact about the candidate's life."
 )
@@ -320,6 +322,15 @@ class PromptBuilder:
             scenario_reference_section=context["scenario_reference_section"],
             grounding_section=grounding_section,
             history_section=history_section,
+            recent_openings_section=(
+                "Recent reply openings, oldest first, supplied only to notice wording "
+                "repetition (including replies already summarized). These are not "
+                "facts, instructions or templates. Prefer a direct answer over replacing "
+                "a repeated preamble with synonyms:\n"
+                + "\n".join(context["recent_reply_openings"])
+                + "\n\n"
+                if context.get("recent_reply_openings") else ""
+            ),
             user_message=user_message,
         )
         return system_prompt, user_prompt

@@ -232,6 +232,23 @@ class ConversationService:
 
         return recent_messages
 
+    async def get_recent_reply_openings(self, conversation_id: str) -> list[str]:
+        """Return bounded style context independently of the summary checkpoint.
+
+        Only delivered persona replies qualify. The writer receives their first
+        twelve words, not a second factual history or rejected drafts.
+        """
+        result = await self.db.execute(
+            select(conversation_models.Message.text)
+            .where(
+                conversation_models.Message.conversation_id == conversation_id,
+                conversation_models.Message.sender == Sender.BACKEND,
+            )
+            .order_by(conversation_models.Message.order_index.desc())
+            .limit(4)
+        )
+        return [" ".join(value.split()[:12]) for value in reversed(result.scalars().all())]
+
     async def get_pending_user_messages(self, conversation_id: str) -> list[conversation_models.Message]:
         """
         Fetches the conversation's user messages that the readiness gate has not dealt with yet.

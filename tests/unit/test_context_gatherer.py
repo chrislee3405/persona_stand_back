@@ -172,6 +172,9 @@ class FakeConversations:
         messages = list(self.messages)
         return messages[:-1] if exclude_last and messages else messages
 
+    async def get_recent_reply_openings(self, conversation_id):
+        return ["I'd start by looking at the logs."]
+
     async def get_pending_user_messages(self, conversation_id):
         return list(self.pending)
 

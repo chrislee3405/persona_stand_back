@@ -399,7 +399,10 @@ class ResponseGate:
                     f"The response has been rejected across these attempts so far:\n{reject_history_text}\n\n"
                     f"Most recent response:\n{current_response}\n\n"
                     "Regenerate a corrected response that fixes all of these problems at once, "
-                    "changing as little else as possible."
+                    "changing as little else as possible. Preserve the original voice, "
+                    "sentence structure and contractions unless a specific correction "
+                    "requires changing them. Do not add an acknowledgement, spoken "
+                    "filler or a new introductory phrase."
                 )
             else:  # <reject-major>
                 regen_system_prompt = (

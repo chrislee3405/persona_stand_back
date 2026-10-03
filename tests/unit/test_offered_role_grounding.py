@@ -25,7 +25,7 @@ def test_role_learning_question_has_explicit_hypothetical_boundary_and_writer_gu
         "question_type": "behavioural", "coverage": "none", "facts": [], "missing": "",
     })
     assert "propose relevant learning or work priorities" in writer
-    assert "never as an existing plan" in writer
+    assert "Never present them as an existing plan" in writer
     assert "No facts are available" not in writer
 
 

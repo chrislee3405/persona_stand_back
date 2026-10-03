@@ -360,6 +360,9 @@ class ContextGatherer:
             "summary": summary
         }
 
+        context["recent_reply_openings"] = await self.conversation_service.get_recent_reply_openings(
+            conversation_id
+        )
         return context
 
     @staticmethod

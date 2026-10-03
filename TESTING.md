@@ -107,7 +107,7 @@ remain a separate, explicitly triggered process.
 ## Shared release marker
 
 For each release candidate, put the same `RELEASE_VERSION` in the frontend,
-backend and ec2yml repositories (initially `1.0.3-rc.1`). Commit and push both
+backend and ec2yml repositories (initially `1.1.0-rc.1`). Commit and push both
 applications, even if one changes only its marker. Independent tests must pass
 before publication. Images carry version/source/revision labels and both
 `sha-FULL_COMMIT` and `release-MARKER` tags. Publication jobs are serialized;

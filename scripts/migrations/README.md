@@ -1,4 +1,4 @@
-# Per-turn token usage (v1.0.3)
+# Per-turn token usage (v1.1.0)
 
 Before deploying the new backend, open `20261002_message_token_usage.sql` in
 pgAdmin's Query Tool connected to the application's RDS database and execute the
