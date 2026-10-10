@@ -1,6 +1,8 @@
 """Read-only checks for the schema required by this application version."""
-from sqlalchemy import text
+from sqlalchemy import select, text
 
+from app.models.model_configuration import ModelConfiguration
+from app.services.ai.configuration import selection_from_rows
 from app.services.media_schema import require_media_schema
 
 
@@ -30,6 +32,10 @@ async def require_chat_schema(connection):
 
 async def check_readiness(connection):
     await require_chat_schema(connection)
+    if await connection.scalar(text("SELECT to_regclass('mc_one_active')")):
+        raise RuntimeError("Provider selection migration required: run scripts/migrations/20261008_model_configuration_selection.sql")
+    rows = (await connection.execute(select(ModelConfiguration.__table__).where(ModelConfiguration.is_active.is_(True)))).mappings().all()
+    selection_from_rows(rows)
     # Resolve required columns and table permissions even when there are no rows.
     await connection.execute(text("SELECT last_handled_index FROM conversation LIMIT 0"))
     await connection.execute(text("SELECT order_index, token_usage FROM message LIMIT 0"))

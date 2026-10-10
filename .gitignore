@@ -44,10 +44,11 @@ probe_*.py
 audit/
 # The seed files carrying that data stay on disk for local seeding (the
 # loader skips any file that is absent, so a fresh clone still works).
-# Only consent_policy.json, which is public text, is committed. invite_code.json
+# Public consent text and nonsecret model configuration are committed. invite_code.json
 # stays ignored too: a working invite code does not belong in a public repo.
 app/models/seed/*.json
 !app/models/seed/consent_policy.json
+!app/models/seed/model_configuration.json
 
 # CI image receipt and Python publication checks
 image.json

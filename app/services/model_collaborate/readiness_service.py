@@ -3,10 +3,10 @@ import logging
 from fastapi import Depends
 
 from app.chat_trace import trace
-from app.constants import DEFAULT_MODEL
-from app.services.ai.gemini_service import GeminiService
+from app.services.ai.provider_factory import AIService, get_ai_service
 from app.services.model_collaborate import turn_metrics
 from app.services.model_collaborate.prepare_history import prepare_history
+from app.services.model_collaborate.stage_errors import record_failure
 
 logger = logging.getLogger(__name__)
 
@@ -35,39 +35,23 @@ CONTINUE_VERDICT = {"decision": RESPOND, "reason": "visitor went quiet after a w
 CONTINUE_NOTHING_HELD = {"decision": NO_REPLY, "reason": "continue found nothing held"}
 
 _READINESS_SYSTEM_PROMPT = (
-    "You decide whether a job candidate should reply YET to what an "
-    "interviewer has just sent in a live chat. You are not writing the "
-    "reply, and you are not judging whether the candidate knows the answer.\n\n"
-    "You are given the conversation so far and the interviewer's unanswered "
-    "message or messages, oldest first. They arrived without a reply in "
-    "between, so treat them as one incoming group.\n\n"
-    "Choose one `decision`:\n"
-    "- \"respond\"  the group is something to answer now: a question, a "
-    "request, a statement inviting a response, or a complete thought of any "
-    "kind, with no indication the interviewer is still composing that thought.\n"
-    "- \"wait\"     the group appears to be part of an unfinished thought, "
-    "or the interviewer signals more is coming. An explicit request to pause "
-    "is not required: an unfinished clause, setup without the actual question, "
-    "promised list or missing comparison can be enough. Judge the whole group "
-    "with the history. Being able to guess an answer to one part does not make "
-    "the group ready when the rest is evidently still coming.\n"
-    "- \"no_reply\" the group closes the exchange or asks for nothing at all, "
-    "so a reply would be noise: a bare acknowledgement (\"ok\", \"got it\", "
-    "\"cool thanks\"), or a sign-off already answered (\"bye\" after the "
-    "candidate has said goodbye).\n\n"
-    # The client continues held messages after an idle timeout. Permit a
-    # short wait for a likely fragment without withholding complete questions.
-    "When the message plausibly continues an unfinished thought, prefer a "
-    "brief \"wait\" over interrupting with a guessed answer. Do not require "
-    "certainty that another message will arrive. A standalone complete request "
-    "should still receive \"respond\"; mere brevity, typos, missing punctuation "
-    "or non-native grammar alone do not make it a fragment. A greeting "
-    "(\"hi\", \"how are you\") is a turn in the conversation and is always "
-    "\"respond\" -- never \"no_reply\". A completed follow-up that supplies "
-    "the missing part makes the group ready; do not keep waiting because its "
-    "earlier messages were fragments. Uncertainty about "
-    "the answer or available facts belongs to later stages, not readiness.\n\n"
-    "Give a short `reason` -- one clause, for the log, not for the visitor."
+    "Decide whether the candidate should reply now to the interviewer's unanswered messages. "
+    "Judge the whole group, oldest first, using conversation history. Do not write an answer "
+    "or assess whether facts are available.\n"
+    "\n"
+    "Choose decision:\n"
+    "- respond: a complete question, request or thought inviting a reply, with no indication "
+    "more is coming. Always respond to greetings such as \"hi\" or \"how are you\".\n"
+    "- wait: a plausible unfinished thought, setup, promised list, missing comparison, or "
+    "indication more is coming. An explicit pause request is unnecessary; answering one part "
+    "is premature if the rest is clearly unfinished.\n"
+    "- no_reply: a closing acknowledgement such as \"ok\" or \"cool thanks\", or a goodbye "
+    "already answered, where another reply adds nothing.\n"
+    "\n"
+    "Prefer a brief wait for plausible fragments, but brevity, typos, missing punctuation or "
+    "non-native grammar alone do not make a complete request unfinished. Once later messages "
+    "complete the group, respond. Uncertainty about the answer belongs to later stages.\n"
+    "Give a one-clause reason for the log."
 )
 
 _READINESS_USER_PROMPT_TEMPLATE = (
@@ -86,17 +70,17 @@ _READINESS_RESPONSE_SCHEMA = {
 
 
 class ReadinessService:
-    def __init__(self, gemini_service: GeminiService = Depends()):
+    def __init__(self, ai_service: AIService = Depends(get_ai_service)):
         """
-        Stores the injected Gemini service.
+        Stores the injected AI service.
 
         Parameters:
-        - gemini_service (GeminiService): calls the Gemini model — injected by FastAPI, or passed explicitly by ContextGatherer
+        - ai_service (AIService): calls the selected model — injected by FastAPI, or passed explicitly by ContextGatherer
 
         Returns:
-        - None: sets self.gemini_service. No database session: this stage reads the pending messages it is handed and persists nothing. The cursor those messages come from is advanced by ChatService, once the turn's outcome is known.
+        - None: sets self.ai_service. No database session: this stage reads the pending messages it is handed and persists nothing. The cursor those messages come from is advanced by ChatService, once the turn's outcome is known.
         """
-        self.gemini_service = gemini_service
+        self.ai_service = ai_service
 
     async def check(self, pending_texts: list[str], recent_messages: list | None) -> dict:
         """
@@ -129,24 +113,18 @@ class ReadinessService:
 
         try:
             with turn_metrics.stage("readiness"):
-                response = await self.gemini_service.call_model_structured(
-                    model_name=DEFAULT_MODEL,
+                response = await self.ai_service.call_model_structured(
+                    stage="readiness",
                     user_prompt=user_prompt,
                     system_prompt=_READINESS_SYSTEM_PROMPT,
                     schema=_READINESS_RESPONSE_SCHEMA,
                 )
         except Exception:
-            logger.warning(
-                "Readiness check failed -- replying anyway, as if the gate were not there.",
-                exc_info=True,
-            )
+            record_failure("readiness", "call_failed", "respond")
             return dict(READINESS_FALLBACK)
 
         if not isinstance(response, dict) or response.get("decision") not in (RESPOND, WAIT, NO_REPLY):
-            logger.warning(
-                "Readiness check returned no decision in %s -- replying anyway.",
-                (RESPOND, WAIT, NO_REPLY),
-            )
+            record_failure("readiness", "invalid_output", "respond")
             trace.debug("readiness malformed response: %r", response)
             return dict(READINESS_FALLBACK)
 

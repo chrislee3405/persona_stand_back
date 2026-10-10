@@ -28,13 +28,13 @@ def trace_env(monkeypatch):
 
 
 class EchoGemini:
-    async def call_model(self, model_name, user_prompt, system_prompt=None):
+    async def call_model(self, stage, user_prompt, system_prompt=None):
         return f"reply to: {user_prompt}"
 
 
 async def generate(caplog):
     service = ModelCollaborateService.__new__(ModelCollaborateService)
-    service.gemini_service = EchoGemini()
+    service.ai_service = EchoGemini()
     with caplog.at_level(logging.DEBUG):
         await service._generate_reply("system prompt", VISITOR_TEXT)
 

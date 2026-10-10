@@ -18,8 +18,8 @@ def violation(category="contradiction", quote="I do not have that date.", other=
     ("response", "I do not have that date.", []),
     ("response", "not have that", []),
 ])
-def test_unsubstantiated_or_same_claim_cannot_block(source, other, history):
-    assert not _has_rejection_evidence(violation(other=other, source=source), "I do not have that date.", history)
+def test_contradiction_uses_source_option_without_python_text_comparison(source, other, history):
+    assert _has_rejection_evidence(violation(other=other, source=source), "I do not have that date.", history) == (source in ("response", "history"))
 
 
 def test_explicit_internal_contradiction_is_still_blocking():
@@ -33,10 +33,10 @@ def test_explicit_conflict_with_persona_history_is_still_blocking():
         [SimpleNamespace(sender="backend", text="I worked as a teacher.")])
 
 
-@pytest.mark.parametrize("category", ["asked_for_private_info", "made_a_promise", "broke_character", "punctuation"])
-def test_other_rules_still_need_an_exact_quote(category):
+@pytest.mark.parametrize("category", ["asked_for_private_info", "made_a_promise", "punctuation"])
+def test_other_rules_do_not_require_an_exact_quote(category):
     assert _has_rejection_evidence(violation(category, "actual phrase"), "An actual phrase.", [])
-    assert not _has_rejection_evidence(violation(category, "invented phrase"), "An actual phrase.", [])
+    assert _has_rejection_evidence(violation(category, "different wording"), "An actual phrase.", [])
 
 
 @pytest.mark.parametrize("category,reply", [
@@ -77,3 +77,44 @@ async def test_auditor_requests_two_claims_and_excludes_mild_formality():
     assert "implied expectation" in arguments["system_prompt"]
     assert "Ordinary interview formality" in arguments["system_prompt"]
     assert "conflicting_quote" in arguments["schema"]["properties"]["violations"]["items"]["required"]
+
+
+async def test_rewrite_is_reviewed_with_same_behavioural_guidance_and_contract():
+    original = "The trainer improved team performance."
+    corrected = "The trainer is designed to help teams practise."
+    contract = {
+        "question_type": "factual", "coverage": "full", "missing": "",
+        "claims": [{"source_quote": "A trainer for teams to practise.",
+                    "status": "documented", "answer_part": "purpose"}],
+        "response_parts": [{"request": "Explain the benefit", "action": "answer_factual"}],
+    }
+    model = SimpleNamespace(
+        call_model=AsyncMock(return_value=corrected),
+        call_model_structured=AsyncMock(side_effect=[
+            {"result": "<reject-major>", "violations": [], "claim_checks": [
+                {"quote": original, "verdict": "changed_meaning",
+                 "reason": "Describe the intended benefit, not a demonstrated outcome."}]},
+            {"result": "<pass>", "violations": [], "claim_checks": [
+                {"quote": corrected, "verdict": "supported", "reason": "Preserves purpose."}]},
+        ]),
+    )
+    records = SimpleNamespace(append_message=AsyncMock())
+    result = await ResponseGate(model, records).check(
+        {"recent_messages": [], "grounding": contract,
+         "core_personality": "Listen carefully.", "scenario_reference_section": "Prefer coordination.",
+         "doc_reference_section": "RAW DOCUMENT MUST NOT GO TO REVIEWER"},
+        "Explain the benefit", original, "writer instructions", "writer context", "conv", "session", 2,
+    )
+    assert result == corrected
+    reviews = model.call_model_structured.await_args_list
+    assert len(reviews) == 2
+    for call, candidate in zip(reviews, [original, corrected]):
+        prompt = call.kwargs["user_prompt"]
+        assert "Listen carefully." in prompt and "Prefer coordination." in prompt
+        assert contract["claims"][0]["source_quote"] in prompt
+        assert f"Current AI message: {candidate}" in prompt
+        assert "RAW DOCUMENT MUST NOT GO TO REVIEWER" not in prompt
+    rewrite = model.call_model.await_args.kwargs
+    assert "Describe the intended benefit, not a demonstrated outcome." in rewrite["system_prompt"]
+    assert rewrite["user_prompt"] == "writer context"
+    assert reviews[0].kwargs["schema"] == reviews[1].kwargs["schema"]

@@ -5,12 +5,9 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app.services.model_collaborate.context_gatherer import ContextGatherer
+from app.services.model_collaborate.stage_errors import ModelStageError
 
-# What the three phase-2 model calls are: ContextGatherer makes exactly three
-# Gemini calls per turn, told apart by which system prompt they carry.
-TOPIC_CALL = "identify which topics"
-EXAMPLE_CALL = "picking which stored interview question"
-READINESS_CALL = "should reply YET"
+# The explicit stage argument identifies phase-2 calls independently of wording.
 
 DOC_TOPICS = [("study", "what they studied")]
 SCENARIO_TOPICS = [("greeting", "how they open")]
@@ -19,14 +16,14 @@ CANDIDATES = [{"question": "tell me about yourself", "answer": "I studied IT.", 
 
 @pytest.mark.parametrize("question,selected,expected", [
     ("Which parts of your experience are relevant to this position?",
-     ["deployment", "release testing", "invented topic"], ["deployment", "release testing"]),
+     ["deployment", "release testing"], ["deployment", "release testing"]),
     ("What is the weather tomorrow?", [], []),
 ])
 async def test_retrieval_prompt_defers_fact_approval_and_preserves_topic_boundaries(question, selected, expected):
-    # Mock output verifies prompt delivery and filtering, not live relevance decisions.
+    # Mock output verifies prompt delivery and validation, not live relevance decisions.
     from app.services.model_collaborate.role_context import role_context_section
     client = SimpleNamespace(call_model_structured=AsyncMock(return_value={
-        "document_topics": selected, "scenario_topics": ["deployment"],
+        "document_topics": selected, "scenario_topics": [],
     }))
     gatherer, _ = build(gemini=client)
     topics = [("deployment", "Docker and AWS deployment contributions"),
@@ -39,9 +36,9 @@ async def test_retrieval_prompt_defers_fact_approval_and_preserves_topic_boundar
     assert question in call["user_prompt"]
     assert "Junior cloud engineer" in call["user_prompt"]
     prompts = call["system_prompt"] + call["user_prompt"]
-    assert "likely to contain useful evidence" in prompts
+    assert "Retrieve plausible supporting material" in prompts
     assert "grounding will decide" in prompts
-    assert "Exclude clearly unrelated topics" in prompts
+    assert "Exclude unrelated or redundant topics" in prompts
     assert "highly confident" not in prompts
     assert "When in doubt, leave it out" not in prompts
     assert call["schema"]["properties"]["document_topics"]["items"]["enum"] == [t[0] for t in topics]
@@ -73,10 +70,15 @@ class RecordingSession:
     """
 
     def __init__(self, rows_by_table=None):
+        self.new = self.dirty = self.deleted = set()
+        self.commits = 0
         self.in_flight = 0
         self.overlapped = False
         self.rows_by_table = rows_by_table or {}
         self.queries = 0
+
+    async def commit(self):
+        self.commits += 1
 
     async def execute(self, statement):
         self.queries += 1
@@ -91,6 +93,10 @@ class RecordingSession:
             self.in_flight -= 1
         froms = statement.get_final_froms()
         table = froms[0].name if froms else ""
+        if table == "model_configuration":
+            from app.models.model_configuration import MODEL_COLUMNS
+            return _Result([{ "id": 1, "provider": "gemini", "default_model": "test-model",
+                              "use_priority": 1, **dict.fromkeys(MODEL_COLUMNS)}])
         return _Result(self.rows_by_table.get(table, []))
 
 
@@ -100,6 +106,9 @@ class _Result:
 
     def all(self):
         return self._rows
+
+    def mappings(self):
+        return self
 
     def scalar_one_or_none(self):
         return self._rows[0] if self._rows else None
@@ -119,13 +128,12 @@ class FakeGemini:
         self.prompts = {}
         self.cancelled = []
 
-    async def call_model_structured(self, model_name, user_prompt, system_prompt, schema):
-        if TOPIC_CALL in system_prompt:
-            which = "topics"
-        elif READINESS_CALL in system_prompt:
-            which = "readiness"
-        else:
-            which = "example"
+    def configure(self, configuration):
+        self.configuration = configuration
+
+    async def call_model_structured(self, stage, user_prompt, system_prompt, schema):
+        assert stage in {"topics", "readiness", "example"}
+        which = stage
         self.events.append(("start", which))
         self.prompts[which] = user_prompt
         try:
@@ -180,6 +188,8 @@ class FakeConversations:
 
 
 def build(gemini=None, session=None, bm25=None, conversations=None):
+    if gemini is not None and not hasattr(gemini, "configure"):
+        gemini.configure = lambda configuration: None
     personality = SimpleNamespace(
         legal_name="A Candidate", prefer_name="Chris",
         culture_background="somewhere", core_personality="be yourself",
@@ -191,7 +201,7 @@ def build(gemini=None, session=None, bm25=None, conversations=None):
     })
     return ContextGatherer(
         db=session,
-        gemini_service=gemini or FakeGemini(),
+        ai_service=gemini or FakeGemini(),
         bm25_service=bm25 or FakeBM25(),
         conversation_service=conversations or FakeConversations(),
     ), session
@@ -240,16 +250,14 @@ async def test_no_database_reads_overlap():
     assert session.queries > 0
 
 
-async def test_topic_call_failure_still_returns_the_example():
+async def test_topic_call_failure_stops_before_reading_selected_references():
     gemini = FakeGemini(topic_error=TimeoutError("simulated"))
-    gatherer, _ = build(gemini)
-
-    context = await gatherer.gather("how are you", "conv-1")
-
-    assert context["doc_topic_list"] == []
-    assert context["scenario_topic_list"] == []
-    assert context["doc_reference_section"] == "No document reference available."
-    assert context["similar_examples"] == [CANDIDATES[0]]
+    gatherer, session = build(gemini)
+    with pytest.raises(ModelStageError) as error:
+        await gatherer.gather("how are you", "conv-1")
+    assert error.value.stage == "topics"
+    assert error.value.reason == "call_failed"
+    assert session.queries == 4  # Configuration plus the three reference reads.
 
 
 async def test_example_call_failure_still_returns_the_topics():
@@ -259,22 +267,17 @@ async def test_example_call_failure_still_returns_the_topics():
     context = await gatherer.gather("how are you", "conv-1")
 
     assert context["similar_examples"] == []
+    assert context["example_failure"] == "call_failed"
     assert context["doc_topic_list"] == ["study"]
     assert context["scenario_topic_list"] == ["greeting"]
 
 
-async def test_both_calls_failing_still_produces_a_usable_context():
+async def test_both_searches_failing_does_not_produce_a_knowledge_gap():
     gemini = FakeGemini(topic_error=RuntimeError("a"), example_error=RuntimeError("b"))
     gatherer, _ = build(gemini)
 
-    context = await gatherer.gather("how are you", "conv-1")
-
-    assert context["similar_examples"] == []
-    assert context["doc_reference_section"] == "No document reference available."
-    assert context["scenario_reference_section"] == "No scenario reference available."
-    # The parts that do not depend on either call survive untouched.
-    assert context["prefer_name"] == "Chris"
-    assert context["summary"] == "a summary"
+    with pytest.raises(ModelStageError, match="stage=topics"):
+        await gatherer.gather("how are you", "conv-1")
 
 
 async def test_whole_turn_timeout_cancels_both_model_calls():
@@ -330,7 +333,7 @@ async def test_pending_group_becomes_the_message_the_turn_answers():
 
 
 def gemini_prompt(gatherer, which):
-    return gatherer.gemini_service.prompts[which]
+    return gatherer.ai_service.prompts[which]
 
 
 async def test_single_pending_message_evaluates_only_itself():
@@ -377,10 +380,10 @@ class SlowRetrieval(FakeGemini):
     """Readiness answers quickly; the retrieval calls do not. The real shape:
     topic selection carries every topic description and is the slow one."""
 
-    async def call_model_structured(self, model_name, user_prompt, system_prompt, schema):
-        if READINESS_CALL not in system_prompt:
+    async def call_model_structured(self, stage, user_prompt, system_prompt, schema):
+        if stage != "readiness":
             self.delay = 0.4
-        return await super().call_model_structured(model_name, user_prompt, system_prompt, schema)
+        return await super().call_model_structured(stage, user_prompt, system_prompt, schema)
 
 
 @pytest.mark.parametrize("decision", ["wait", "no_reply"])

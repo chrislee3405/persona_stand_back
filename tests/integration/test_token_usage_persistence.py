@@ -1,4 +1,6 @@
+from app.services.ai.provider_factory import AIService
 import asyncio
+import json
 
 import pytest
 from sqlalchemy import select, text
@@ -20,7 +22,9 @@ def instrument_model(fake, monkeypatch):
         async def measured(*args, _original=original, **kwargs):
             with turn_metrics.model_call(kwargs.get("model_name", "test-model")):
                 turn_metrics.record_usage(100, 20, thinking_tokens=30, cached_tokens=0, total_tokens=150)
-                return await _original(*args, **kwargs)
+                result = await _original(*args, **kwargs)
+                turn_metrics.record_response(result if isinstance(result, str) else json.dumps(result))
+                return result
 
         monkeypatch.setattr(fake, method, measured)
 
@@ -43,6 +47,8 @@ async def test_wait_and_continue_usage_stays_on_one_user_row(consented_client, f
         assert runs[1]["stages"]["reply"]["tokens"]["total_tokens"] == 150
         assert runs[1]["stages"]["gate"]["tokens"]["thinking_tokens"] == 30
         assert rows[1].token_usage is None
+        assert json.loads(runs[0]["stages"]["readiness"]["requests"][0]["response"])["decision"] == "wait"
+        assert runs[1]["stages"]["reply"]["requests"][0]["response"]
 
 
 async def test_failed_model_usage_is_retained_on_retagged_user(consented_client, fake_gemini, monkeypatch):
@@ -68,13 +74,14 @@ async def test_background_summary_has_separate_usage_run(db, fake_gemini, monkey
     for index in range(10):
         _, cid = await service.append_message(cid, None, "owner", "user" if index % 2 == 0 else "backend", "example")
     await service.record_token_usage(cid, 8, {"run_id": "earlier-message"})
-    await SummarizationService(fake_gemini).summarize_conversation_if_needed(cid)
+    await SummarizationService(AIService({"gemini": fake_gemini})).summarize_conversation_if_needed(cid)
     async with SessionLocal() as session:
         usage = await session.scalar(select(Message.token_usage).where(Message.conversation_id == cid, Message.order_index == 8))
         assert usage["runs"][0]["run_id"] == "earlier-message"
         run = usage["runs"][1]
         assert run["kind"] == "summary" and run["status"] == "completed"
         assert run["stages"]["summary"]["tokens"]["total_tokens"] == 150
+        assert run["stages"]["summary"]["requests"][0]["response"]
 
 
 async def test_concurrent_run_append_is_lossless_idempotent_and_not_in_prompt(db):

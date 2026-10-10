@@ -33,7 +33,10 @@ def test_role_learning_question_has_explicit_hypothetical_boundary_and_writer_gu
 async def test_role_question_can_reach_writer_without_candidate_facts(role):
     client = SimpleNamespace(call_model_structured=AsyncMock(return_value={
         "question_type": "factual", "coverage": "full",
-        "facts": [f"Offered role: {role}."], "missing": "",
+        "claims": [{"source_quote": f"Role: {role}.",
+                    "statement": f"The offered position is {role}.",
+                    "status": "documented", "answer_part": "position"}],
+        "response_parts": [{"request": "position", "action": "answer_factual"}], "missing": "",
     }))
     context = dict(job_context=f"Role: {role}. Skills: Kubernetes.",
                    doc_reference_section="", similar_examples=[], recent_messages=[], summary=None,
@@ -45,7 +48,7 @@ async def test_role_question_can_reach_writer_without_candidate_facts(role):
     assert context["job_context"] in call["user_prompt"]
     assert "Role requirements are never evidence of candidate experience" in call["system_prompt"]
     system, user = PromptBuilder().build_reply(question, context, grounding)
-    assert f"Offered role: {role}." in user
+    assert f"Role: {role}." in user
     assert "No facts are available" not in user
     assert "not your background" in system
 

@@ -49,6 +49,14 @@ GOOGLE_ADC_PATH=~/.config/gcloud/application_default_credentials.json
 # nothing and every chat turn fails to authenticate.
 GOOGLE_APPLICATION_CREDENTIALS=/app/adc.json
 
+# --- Other AI providers --------------------------------------------------
+# The fresh seed enables Gemini and OpenAI. OpenAI selects example IDs;
+# Gemini handles the other stages. Credentials are environment variables,
+# while provider priorities and model names live in model_configuration.
+OPENAI_API_KEY=<your-openai-api-key>
+# Only needed if you explicitly configure and enable Grok:
+# XAI_API_KEY=<your-xai-api-key>
+
 # --- Logging and cookie security -----------------------------------------
 # Leave these unset locally unless you need them. See "LOG_LEVEL,
 # SESSION_COOKIE_SECURE and CHAT_TRACE" below before setting any of them
@@ -89,10 +97,23 @@ translated for asyncpg.
 docker compose up --build
 ```
 
-Postgres comes up first (the backend waits on its healthcheck), then the
-backend creates any missing tables on startup.
+Postgres comes up first. Local Compose then runs the seed loader to create
+missing tables and insert missing seed records before starting Uvicorn. A seed
+failure stops startup. Existing tables still need the SQL migrations documented
+in [scripts/migrations/README.md](scripts/migrations/README.md); schema creation
+does not alter existing columns or indexes.
 
-### 3. Seed the database
+### 3. Check configuration and load site content
+
+Initial seeding is automatic. A fresh clone includes the public consent policy
+and provider/model presets, but no private site or persona content. The default
+presets enable Gemini at priority 1 and OpenAI at priority 2. Supply Vertex
+credentials and `OPENAI_API_KEY`, or explicitly change the database selection
+before testing chat. A missing key does not automatically route to another provider.
+
+See [AI configuration](docs/ai-configuration.md) for current models, per-stage
+selection, exclusive-provider setup, credential requirements and activation.
+After adding approved private seed files, manually load missing records with:
 
 ```bash
 docker compose exec backend python -m app.models.seed.load
@@ -100,7 +121,7 @@ docker compose exec backend python -m app.models.seed.load
 
 The real content seed files are **gitignored** — this repository is public and
 they hold the owner's CV, transcript and contact details. A fresh clone seeds
-only the consent policy; see
+the consent policy and AI presets; see
 [`app/models/seed/README.md`](app/models/seed/README.md) for how to bring real
 content onto a new machine, and how to add a local invite code (which must
 never reach a deployed database). To check the seed files without writing
@@ -184,7 +205,7 @@ DELETE FROM corpus_cache;
 
 ## Deleting a conversation on request
 
-There is no self-service deletion. Under the chat window each visitor sees a
+There is no self-service deletion. In the chat history each visitor sees a
 **conversation reference** — the conversation's id, which is random and says
 nothing about who they are — and the consent notice tells them to contact the
 site owner to have something removed. When a request quotes a reference:

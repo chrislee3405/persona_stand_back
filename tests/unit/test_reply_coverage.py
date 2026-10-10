@@ -24,9 +24,9 @@ def test_boundary_wording_can_adapt_to_history_without_relaxing_the_boundary():
         "recent_messages": [SimpleNamespace(sender="backend", text=previous)], "summary": None,
     }, {"question_type": "behavioural", "coverage": "none", "facts": [], "missing": ""})
     assert previous in user and boundary in user
-    assert "avoid recycling an opening or explanation" in system
+    assert "avoid repeated sentence patterns" in system
     assert "a short reminder is enough" in system
-    assert "overrides scenario style instructions, never its substantive limits" in system
+    assert "Preserve substantive scenario boundaries but adapt wording to the request" in system
     assert "prohibited partial solution" in system
 
 
@@ -76,7 +76,7 @@ def test_current_intention_can_answer_broad_goal_without_adding_deadline():
         "doc_reference_section": "Looking for a graduate or junior developer role.",
     }
     question = "Whats your target this year"
-    ground_system, ground_user = GroundingService(gemini_service=object())._build_prompts(question, context)
+    ground_system, ground_user = GroundingService(ai_service=object())._build_prompts(question, context)
     assert context["doc_reference_section"] in ground_user
     assert question in ground_user
     assert "current intention can supply full coverage" in ground_system

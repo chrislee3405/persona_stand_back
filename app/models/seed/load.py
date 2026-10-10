@@ -43,10 +43,12 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import SessionLocal, engine, Base
+from app.models.model_configuration import ModelConfiguration
+from app.services.ai.configuration import AIConfiguration
 from app.models.code import InviteCode
 from app.models.consent import ConsentPolicy
 from app.models.prompt_reference import (
@@ -378,6 +380,44 @@ async def _load_singleton(db: AsyncSession, dry_run: bool, *, file_name: str, mo
     return len(payload)
 
 
+async def _load_model_configuration(db, dry_run):
+    payload = _read("model_configuration.json")
+    if payload is None:
+        return 0
+    if not isinstance(payload, list) or not payload:
+        raise ValueError("model_configuration.json must contain provider configurations")
+    providers = set()
+    for row in payload:
+        if not isinstance(row, dict) or type(row.get("is_active")) is not bool:
+            raise ValueError("Each provider must have a boolean is_active")
+        priority = row.get("use_priority", 1)
+        if type(priority) is not int or priority < 1:
+            raise ValueError("use_priority must be a positive integer")
+        config = AIConfiguration(**{key: value for key, value in row.items() if key not in {"is_active", "use_priority"}})
+        if config.provider in providers:
+            raise ValueError("Duplicate provider configuration")
+        providers.add(config.provider)
+    priorities = [row.get("use_priority", 1) for row in payload if row["is_active"]]
+    if not priorities or len(set(priorities)) != len(priorities):
+        raise ValueError("Seed must enable providers with unique priorities")
+    if dry_run:
+        return 0
+    await db.execute(text("LOCK TABLE model_configuration IN SHARE ROW EXCLUSIVE MODE"))
+    existing = list((await db.scalars(select(ModelConfiguration))).all())
+    existing_providers = {row.provider for row in existing}
+    next_id = max((row.id for row in existing), default=0)
+    inserted = 0
+    for row in payload:
+        if row["provider"] in existing_providers:
+            continue
+        next_id += 1
+        # Existing deployment selections are never changed by startup seeding.
+        values = {**row, "is_active": row["is_active"] if not existing else False}
+        db.add(ModelConfiguration(id=next_id, **values))
+        inserted += 1
+    return inserted
+
+
 # --- Entry point ----------------------------------------------------------
 
 async def seed(dry_run: bool = False, create_tables: bool = True) -> None:
@@ -399,7 +439,7 @@ async def seed(dry_run: bool = False, create_tables: bool = True) -> None:
         logger.info("schema ready")
 
     async with SessionLocal() as db:
-        total = 0
+        total = await _load_model_configuration(db, dry_run)
         total += await _load_site_content(db, dry_run)
         total += await _load_site_journey(db, dry_run)
         total += await _load_site_project(db, dry_run)

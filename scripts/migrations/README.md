@@ -1,3 +1,38 @@
+# AI model configuration
+
+For an existing database, stop the old backend and apply these files in order
+before starting the current backend. Use the files from the selected backend
+release, not a different branch. Back up the database first; execute each whole
+file with pgAdmin or `psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f FILE`.
+
+| Order | File | Change |
+| --- | --- | --- |
+| 1 | `20261005_model_configuration.sql` | Creates the initial configuration and preserves existing settings on rerun. |
+| 2 | `20261006_model_configuration_use_priority.sql` | Adds positive provider priority; smaller values indicate higher preference. |
+| 3 | `20261007_model_configuration_providers.sql` | Adds per-provider presets and enabled state while preserving the existing selection. |
+| 4 | `20261008_model_configuration_selection.sql` | Removes the single-enabled-provider restriction and requires unique priorities among enabled providers. |
+
+Run older applicable media, conversation-cursor and token-usage migrations first
+(documented below). The configuration migrations preserve owner settings; they
+do not switch an existing deployment to the fresh seed's Gemini/OpenAI routing.
+Fresh databases created from the current ORM use the seed loader instead of
+these upgrade migrations. Local Compose seeds automatically; production requires
+explicit initialization. Application startup requires a valid enabled selection
+and rejects the old `mc_one_active` index.
+
+```sql
+SELECT provider, is_active, use_priority, default_model,
+       example_selection_model, response_model, summary_model
+FROM model_configuration ORDER BY use_priority, provider;
+```
+
+At least one provider must be enabled, with distinct positive priorities.
+Credentials must be available for every provider selected by a stage. See
+[AI configuration](../../docs/ai-configuration.md) for stage selection, activation
+and credential requirements. Restoring an older application may require restoring
+its compatible configuration/constraints; do not roll back by dropping this
+table or resetting owner settings.
+
 # Per-turn token usage (v1.1.0)
 
 Before deploying the new backend, open `20261002_message_token_usage.sql` in
@@ -51,7 +86,10 @@ the SDK, provider usage not returned after network failure, process termination
 and database write failures cannot be measured reliably by this mechanism.
 This is operational usage telemetry, not an invoice reconciliation system.
 
-Usage contains no prompt or reply text. It is excluded from prompts and API
+Usage now includes each model request's returned text under `response`, including
+raw structured JSON before parsing, and `refusal` where returned. These additive
+JSONB fields need no further migration. Treat exports as private conversation
+data; stage failure codes remain content-free. Usage is excluded from prompts and API
 responses and is not loaded with ordinary message queries. Writes are bounded,
 best effort and separate from reply publication so logging errors do not discard
 a valid reply. Concurrent runs append under a row lock and duplicate run IDs are
@@ -128,3 +166,21 @@ The container health check uses `/api/health/ready`, which checks database acces
 and the current schema; `/docs` only proves that HTTP is serving. After migrating,
 verify readiness and new guest/invite conversations before ending the maintenance
 window. This check never seeds data or repairs old cursors automatically.
+
+### Multiple provider presets (2026-10-07)
+Run `20261007_model_configuration_providers.sql` after the configuration and priority
+migrations, before deploying the new backend. It replaces the singleton constraint
+with one row per provider and one active row, preserving the existing selection.
+This single-active-row rule is an intermediate upgrade state: immediately follow
+with the 8 October selection migration before running the current backend.
+It adds missing OpenAI/Gemini presets without overwriting owner settings. See
+[AI configuration](../../docs/ai-configuration.md) for transactional switching SQL. Automatic seeding does
+not apply this schema migration to existing databases.
+
+### Provider selection by stage (2026-10-08)
+
+After the earlier configuration migrations, stop the old backend and run
+`20261008_model_configuration_selection.sql`. It removes `mc_one_active` and
+requires unique priorities among enabled providers. Existing settings and enabled
+states are preserved. The migration is transactional and can be rerun.
+Fresh databases created by the updated ORM already use this schema.

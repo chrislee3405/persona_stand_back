@@ -16,7 +16,20 @@ python -m app.models.seed.load             # create any missing tables, then loa
 python -m app.models.seed.load --dry-run   # validate every file, write nothing
 ```
 
-Inside the local compose stack:
+Local Compose automatically waits for PostgreSQL to be healthy, creates missing
+tables and seeds missing records, then starts Uvicorn. From `persona_stand_back/`:
+
+```bash
+docker compose up -d --build
+```
+
+No separate seed command or backend restart is needed after a fresh volume.
+Seeding runs on each backend container start; existing records and model settings
+are preserved. A seed failure prevents Uvicorn from starting. This is local-only;
+production initialization remains an explicit operator step. Existing schema
+changes still require migrations because `create_all` does not alter tables.
+
+To manually load newly added seed records into an already running local stack:
 
 ```bash
 docker compose exec backend python -m app.models.seed.load
@@ -42,8 +55,14 @@ quietly inventing terms.
 
 ## Container data boundary
 
-Runtime images exclude private seed JSON, database exports and backups. Only
-`consent_policy.json` is distributable seed data. To load approved private data,
+Runtime images exclude private seed JSON, database exports and backups.
+`consent_policy.json` and `model_configuration.json` are distributable seed data.
+The model configuration seed enables Gemini (priority 1) and OpenAI (priority 2)
+on a fresh database. OpenAI selects example IDs; Gemini handles the other stages.
+Existing databases require `20261007_model_configuration_providers.sql` and
+`20261008_model_configuration_selection.sql` before
+using the multi-provider seed. Re-seeding preserves existing model settings and
+adds missing providers as inactive. To load approved private data,
 mount the approved JSON files individually, read-only, at their matching
 `/app/app/models/seed/<filename>.json` paths for the operator loader command.
 Keep the loader's Python files in place; do not mask the package with a directory
@@ -57,15 +76,16 @@ but its generated output is never an image build input.
 **This repository is public.** The seed files carry the site owner's real
 content — CV, academic transcript, residency status, contact details and the
 persona's profile — so `.gitignore` keeps every `*.json` here out of git
-except one:
+except the following public configuration files:
 
 | Committed | Why it is safe |
 |---|---|
 | `consent_policy.json` | the consent notice, which is public text shown to every visitor |
+| `model_configuration.json` | provider/model presets without credentials |
 
 Everything else lives only on your machine, `invite_code.json` included — a
 working invite code has no business in a public repository, even a local one.
-A fresh clone therefore seeds just the consent policy — the loader skips any
+A fresh clone therefore seeds the consent policy and model presets — the loader skips any
 file that is absent — and renders the site's empty states; the chat has no
 persona profile to answer from until the reference files are loaded. To get
 real content onto a new machine, export it from a database that already has

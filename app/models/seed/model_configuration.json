@@ -1,0 +1,30 @@
+[
+  {
+    "provider": "openai",
+    "is_active": true,
+    "use_priority": 2,
+    "default_model": "gpt-4.1-mini",
+    "readiness_model": null,
+    "topic_selection_model": null,
+    "example_selection_model": "gpt-4.1-mini",
+    "grounding_model": null,
+    "response_model": null,
+    "response_check_model": null,
+    "response_split_model": null,
+    "summary_model": null
+  },
+  {
+    "provider": "gemini",
+    "is_active": true,
+    "use_priority": 1,
+    "default_model": "gemini-3.5-flash-lite",
+    "readiness_model": "gemini-3.5-flash-lite",
+    "topic_selection_model": "gemini-3.5-flash-lite",
+    "example_selection_model": null,
+    "grounding_model": "gemini-3.5-flash-lite",
+    "response_model": "gemini-3.5-flash-lite",
+    "response_check_model": "gemini-3.5-flash-lite",
+    "response_split_model": "gemini-3.5-flash-lite",
+    "summary_model": "gemini-2.5-flash"
+  }
+]

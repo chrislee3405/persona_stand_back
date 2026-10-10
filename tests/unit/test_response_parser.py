@@ -39,10 +39,10 @@ async def test_excess_bubbles_merge_without_losing_tail():
     [RESPONSE, RESPONSE],
     ['The second sentence explains its tests.', 'The first sentence describes the project.'],
 ])
-async def test_split_cannot_rewrite_approved_content(split):
+async def test_split_text_is_not_compared_by_python(split):
     gemini = AsyncMock()
     gemini.call_model_structured.return_value = split
-    assert await ResponseParser(gemini).parse(RESPONSE) == [RESPONSE]
+    assert await ResponseParser(gemini, min_chars_per_turn=20).parse(RESPONSE) == split
 
 
 async def test_exact_partition_may_normalize_whitespace():

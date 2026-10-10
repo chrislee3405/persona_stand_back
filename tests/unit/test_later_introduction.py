@@ -31,7 +31,7 @@ def test_later_introduction_keeps_reference_facts_despite_prior_refusal(question
         # Deliberately lossy: fresh references must still reach grounding.
         "summary": "The candidate declined to answer." if summarized else None,
     }
-    ground_system, ground_user = GroundingService(gemini_service=object())._build_prompts(question, context)
+    ground_system, ground_user = GroundingService(ai_service=object())._build_prompts(question, context)
     assert background in ground_user
     assert question in ground_user
     assert (context["summary"] if summarized else refusal) in ground_user
@@ -46,14 +46,14 @@ def test_later_introduction_keeps_reference_facts_despite_prior_refusal(question
     })
     assert background in user
     assert question in user
-    assert "when explicitly asked for an introduction, recap, or repeated explanation" in system
-    assert "reuse relevant approved facts even if already discussed" in system
+    assert "reuse relevant approved facts for requested introductions, recaps or explanations" in system
+    assert "An earlier refusal does not justify refusing a now-supported request" in system
     assert "do not re-introduce yourself" not in system
     assert "supported shorter answer" in system
     assert "No facts are available" not in user
 
 
 def test_summary_keeps_facts_and_limits_refusal_scope():
-    assert "Preserve concrete background facts alongside any declined answers" in _SYSTEM_PROMPT
-    assert "specific question or requested part" in _SYSTEM_PROMPT
-    assert "not a restriction on future answers" in _SYSTEM_PROMPT
+    assert "Retain concrete background facts alongside refusals" in _SYSTEM_PROMPT
+    assert "specific question or request part" in _SYSTEM_PROMPT
+    assert "not a general knowledge gap or restriction on future answers" in _SYSTEM_PROMPT

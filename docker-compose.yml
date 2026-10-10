@@ -52,7 +52,12 @@ services:
     # --reload belongs HERE, not in the Dockerfile: this is the only file that
     # bind-mounts the source, so this is the only place a file watcher has
     # anything to watch.
-    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    # Create missing tables and seed missing records before the application
+    # checks its required configuration. A failed seed must prevent startup.
+    command:
+      - /bin/sh
+      - -c
+      - python -m app.models.seed.load && exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
     ports:
       - "8000:8000"
     environment:

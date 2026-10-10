@@ -14,6 +14,7 @@ from app.services.conversation_manage_service import ConversationService, Conver
 from app.services.model_collaborate_service import ModelCollaborateService, TurnOutcome
 from app.services.model_collaborate.readiness_service import NO_REPLY, RESPOND
 from app.services.model_collaborate.response_gate import is_fallback_response
+from app.services.model_collaborate.stage_errors import ModelStageError
 from app.services.model_collaborate import turn_metrics
 from app.services.privacy_gate_service import PrivacyGateService
 from app.services.rate_control_service import RateControlService, RateTier, get_rate_control_service
@@ -468,7 +469,8 @@ class ChatService:
             logger.exception(
                 "[%s] model_orchestration failed for conversation_id=%s", incident_id, conversation_id
             )
-            detail = type(exc).__name__  # Provider/SQL exception text can contain private input.
+            # Only our fixed stage codes are safe to include in review rows.
+            detail = str(exc) if isinstance(exc, ModelStageError) else type(exc).__name__
 
         try:
             await self.conversation_service.append_message(

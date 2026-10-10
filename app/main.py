@@ -22,6 +22,7 @@ from app.services.rate_control_service import (
 )
 from app.routers import chatroom_router, codes_router, conversations_router, consent_router, site_content_router
 from app.database import engine, coordination_engine, Base
+from app.models.model_configuration import ModelConfiguration  # noqa: F401
 from app.models.consent import ConsentPolicy  # noqa: F401  -- registers table for create_all
 from app.models.rate_limit import RateLimitCounter  # noqa: F401  -- registers table for create_all
 from app.models.site_content import SiteContent  # noqa: F401  -- registers table for create_all

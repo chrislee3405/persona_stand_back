@@ -34,9 +34,13 @@ class FakeGemini:
         if "decision" in properties:
             return {"decision": self.readiness_decision, "reason": "fake readiness verdict"}
         if "question_type" in properties:
-            return {"question_type": "factual", "coverage": "full", "facts": [REPLY], "missing": ""}
+            return {"question_type": "factual", "coverage": "full", "missing": "",
+                    "response_parts": [{"request": "portfolio", "action": "answer_factual"}],
+                    "claims": [{"source_quote": REPLY, "statement": REPLY, "status": "documented", "answer_part": "portfolio"}]}
         if "result" in properties:
-            return {"result": "<pass>", "violations": []}
+            return {"result": "<pass>", "violations": [], "claim_checks": [
+                {"quote": REPLY, "verdict": "supported", "reason": "Fictional reference matches."},
+            ]}
         if "document_topics" in properties or "scenario_topics" in properties:
             return {key: value["items"]["enum"][:1] for key, value in properties.items()}
         if schema.get("type", "").upper() == "STRING":

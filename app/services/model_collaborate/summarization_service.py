@@ -1,14 +1,15 @@
+from app.services.ai.configuration import load_configuration
 import logging
 import asyncio
 
 from fastapi import Depends
 
-from app.constants import SUMMARY_MODEL
 from app.database import SessionLocal
 from app.services.conversation_manage_service import ConversationService
-from app.services.ai.gemini_service import GeminiService
+from app.services.ai.provider_factory import AIService, get_ai_service
 from app.services.model_collaborate.prepare_history import prepare_history
 from app.services.model_collaborate import turn_metrics
+from app.services.model_collaborate.stage_errors import ModelStageError, record_failure
 
 logger = logging.getLogger(__name__)
 
@@ -21,21 +22,15 @@ RECENT_MESSAGES_BEFORE_SUMMARIZE = 10
 # rule. It is also a fabrication vector in its own right -- anything invented
 # while compressing becomes indistinguishable from something actually said.
 _SYSTEM_PROMPT = (
-    "You are summarizing a job interview between an interviewer and a candidate. "
-    "Write an updated summary from the past summary plus the recent messages in "
-    "the user message below.\n"
-    "- Refer to the two participants only as \"the interviewer\" and \"the "
-    "candidate\". Never call either of them an AI, a model, a bot, or an "
-    "assistant, whatever the transcript labels say.\n"
-    "- Record only what was actually said. Do not add, infer, or round any "
-    "detail that is not in the transcript -- especially dates, numbers, "
-    "durations and counts.\n"
-    "- Keep straight which side said what. Preserve concrete background "
-    "facts alongside any declined answers. For each refusal, record the "
-    "specific question or requested part it concerned, not a general lack "
-    "of knowledge. A prior refusal records what happened, not a restriction "
-    "on future answers; do not broaden its scope.\n"
-    "Respond only with the updated summary text, with no preamble or explanation."
+    "Update the interview summary using only the past summary and recent messages. Return the"
+    " summary text alone.\n"
+    "\n"
+    "Call the participants \"the interviewer\" and \"the candidate\", regardless of transcript "
+    "labels; do not call either an AI, model, bot or assistant. Attribute statements to the "
+    "correct speaker. Record only what was said; never add, infer or round facts, dates, "
+    "quantities or durations. Retain concrete background facts alongside refusals. Tie each "
+    "refusal to its specific question or request part; it records that exchange, not a "
+    "general knowledge gap or restriction on future answers."
 )
 
 _USER_PROMPT_TEMPLATE = (
@@ -73,17 +68,17 @@ class SummarizationService:
     are read afterwards.
     """
 
-    def __init__(self, gemini_service: GeminiService = Depends()):
+    def __init__(self, ai_service: AIService = Depends(get_ai_service)):
         """
-        Stores the injected Gemini service.
+        Stores the injected AI service.
 
         Parameters:
-        - gemini_service (GeminiService): calls the Gemini model — injected by FastAPI
+        - ai_service (AIService): calls the selected model — injected by FastAPI
 
         Returns:
-        - None: sets self.gemini_service. No database session and no ConversationService are injected: this runs after the request's session is gone, so it opens its own — see the class docstring.
+        - None: sets self.ai_service. No database session and no ConversationService are injected: this runs after the request's session is gone, so it opens its own — see the class docstring.
         """
-        self.gemini_service = gemini_service
+        self.ai_service = ai_service
 
     async def summarize_conversation_if_needed(self, conversation_id: str) -> None:
         """
@@ -107,6 +102,9 @@ class SummarizationService:
         """
         try:
             await self._summarize_conversation_if_needed(conversation_id)
+        except ModelStageError:
+            # Already recorded using content-free stage codes. Keep the checkpoint.
+            pass
         except Exception:
             logger.exception(
                 "summarization failed for conversation_id=%s -- the reply was already sent and persisted, "
@@ -130,6 +128,7 @@ class SummarizationService:
             conversation = await conversation_service.get_conversation_unlocked(conversation_id)
             if conversation is None:
                 return
+            configuration = await load_configuration(read_session)
             summary = conversation.summary
             recent_messages = await conversation_service.get_recent_messages(
                 conversation_id, exclude_last=False
@@ -140,6 +139,9 @@ class SummarizationService:
         if len(recent_messages) < RECENT_MESSAGES_BEFORE_SUMMARIZE:
             return
 
+        ai_service = self.ai_service.new_run()
+        ai_service.configure(configuration)
+
         # Background summaries have their own run, attached to the last included
         # user message. They must not overwrite that message's chat-turn usage.
         anchor = next((m for m in reversed(recent_messages) if m.sender == "user"), recent_messages[-1])
@@ -148,7 +150,7 @@ class SummarizationService:
             try:
                 with turn_metrics.stage("summary"):
                     await self.summarize_conversation(
-                        conversation_id=conversation_id, summary=summary, recent_messages=recent_messages,
+                        conversation_id=conversation_id, summary=summary, recent_messages=recent_messages, ai_service=ai_service,
                     )
                 status = "completed"
             finally:
@@ -161,9 +163,9 @@ class SummarizationService:
                 except Exception:
                     logger.exception("Could not persist summary token usage for conversation_id=%s", conversation_id)
 
-    async def summarize_conversation(self, conversation_id: str, summary: str | None, recent_messages: list) -> None:
+    async def summarize_conversation(self, conversation_id: str, summary: str | None, recent_messages: list, ai_service: AIService | None = None) -> None:
         """
-        Generates an updated summary via Gemini and persists it as the conversation's new checkpoint.
+        Generates an updated summary via the selected provider and persists it as the conversation's new checkpoint.
 
         Parameters:
         - conversation_id (str): the conversation to summarize — comes from _summarize_conversation_if_needed
@@ -196,11 +198,23 @@ class SummarizationService:
             messages_section=messages_section
         )
 
-        updated_summary = await self.gemini_service.call_model(
-            model_name=SUMMARY_MODEL,
-            user_prompt=user_prompt,
-            system_prompt=_SYSTEM_PROMPT
-        )
+        if ai_service is None:
+            ai_service = self.ai_service.new_run()
+            async with SessionLocal() as config_session:
+                ai_service.configure(await load_configuration(config_session))
+
+        try:
+            updated_summary = await ai_service.call_model(
+                stage="summary",
+                user_prompt=user_prompt,
+                system_prompt=_SYSTEM_PROMPT
+            )
+        except Exception:
+            record_failure("summary", "call_failed", "keep_summary")
+            raise ModelStageError("summary", "call_failed") from None
+        if not isinstance(updated_summary, str) or not updated_summary.strip():
+            record_failure("summary", "invalid_output", "keep_summary")
+            raise ModelStageError("summary", "invalid_output")
 
         newest_index = recent_messages[-1].order_index
 

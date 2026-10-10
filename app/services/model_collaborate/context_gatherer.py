@@ -1,20 +1,23 @@
+from app.services.ai.configuration import load_configuration
+from app.services.read_phase import finish_read_phase
 import asyncio
 import logging
 import time
+from dataclasses import dataclass, field
 
 from fastapi import Depends
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.chat_trace import trace
-from app.constants import DEFAULT_MODEL
 from app.database import get_db
-from app.services.ai.gemini_service import GeminiService
+from app.services.ai.provider_factory import AIService, get_ai_service
 from app.services.bm25_service import BM25Service
 from app.services.conversation_manage_service import ConversationService
 from app.services.model_collaborate import turn_metrics
 from app.services.model_collaborate.prepare_history import prepare_history
 from app.services.model_collaborate.role_context import role_context_section
+from app.services.model_collaborate.stage_errors import record_failure, stage_error
 from app.services.model_collaborate.readiness_service import (
     CONTINUE_NOTHING_HELD,
     CONTINUE_VERDICT,
@@ -39,6 +42,20 @@ _NO_DOC_REFERENCE = "No document reference available."
 _NO_SCENARIO_REFERENCE = "No scenario reference available."
 
 
+@dataclass
+class ExampleSelection:
+    examples: list[dict] = field(default_factory=list)
+    failure_reason: str | None = None
+
+
+def _consume_completion(task: asyncio.Future) -> None:
+    # Readiness may finish with wait/no_reply after a sibling has already
+    # failed. Observe that exception without delaying a held turn or treating
+    # cancelled, unused retrieval as a failure of the visitor's message.
+    if not task.cancelled():
+        task.exception()
+
+
 async def _continue_verdict() -> dict:
     """
     Stands in for the readiness call on a continue turn that has something held.
@@ -58,29 +75,18 @@ async def _continue_verdict() -> dict:
 # an extra round trip on every message. The response schema gives each list its
 # own enum, so the model still cannot put a scenario topic in the document list.
 _FIND_TOPIC_SYSTEM_PROMPT = (
-    "Your task is to identify which topics are relevant to the user's current "
-    "message. There are two independent lists:\n"
-    "- DOCUMENT topics: factual reference material about the candidate.\n"
-    "- SCENARIO topics: guidance on how the candidate behaves or approaches a "
-    "kind of question.\n"
-    "Judge the two lists separately. A message may need topics from both, from "
-    "one, or from neither.\n\n"
-    "Retrieve a small, focused set of topics likely to contain useful evidence "
-    "or guidance. This is retrieval, not factual approval: grounding will "
-    "decide which retrieved facts actually support the answer. Use conversation "
-    "context and any offered-role brief to resolve indirect references. For "
-    "broad experience or suitability questions, include relevant skills, "
-    "projects and contributions even when the user does not name them. "
-    "For example, a cloud-role suitability question can need deployment, "
-    "release-testing and database-reliability references. A topic need not "
-    "answer the whole question by itself. Do not reject plausible supporting "
-    "evidence merely because relevance requires connecting it to the question. "
-    "Exclude clearly unrelated topics and redundant selections. Do not fetch "
-    "role-related material for an unrelated question merely because a brief "
-    "is present. Return an empty array for a list when none of its topics "
-    "could reasonably help.\n\n"
-    "Return only exact topic strings, each from the list it belongs to -- "
-    "never invent a topic, and never return a topic under the other list."
+    "Select a small, focused set of useful topics independently from DOCUMENT (candidate "
+    "evidence) and SCENARIO (behavioural guidance). Either list may be empty.\n"
+    "\n"
+    "Use history and any offered-role brief to resolve references. Retrieve plausible "
+    "supporting material; grounding will decide factual support. Broad experience or "
+    "suitability questions may need relevant skills, projects and contributions even when "
+    "unnamed. For example, cloud suitability may need deployment, release-testing and "
+    "database-reliability topics. A topic need not answer the whole question.\n"
+    "\n"
+    "Exclude unrelated or redundant topics. A role brief does not make role-related topics "
+    "relevant to an unrelated question. Return only exact strings from the correct list; "
+    "return an empty array when none could help."
 )
 
 _FIND_TOPIC_USER_PROMPT_TEMPLATE = (
@@ -97,17 +103,10 @@ _FIND_TOPIC_USER_PROMPT_TEMPLATE = (
 )
 
 _SELECT_EXAMPLE_SYSTEM_PROMPT = (
-    "You are picking which stored interview question -- if any -- genuinely "
-    "matches what the user is asking right now, so its stored answer can "
-    "guide the reply.\n\n"
-    "The candidates were retrieved by keyword overlap, which is easily "
-    "misled by shared generic words such as \"tell\", \"yourself\", "
-    "\"interest\", or \"company\". Judge by MEANING, not shared words: keep "
-    "a candidate only if it asks for essentially the same thing as the "
-    "user's current message. If none of them do, choose \"none\" -- a wrong "
-    "match is worse than no match.\n\n"
-    "Use the conversation history only to understand what the current "
-    "message refers to, not as a question in its own right."
+    "Select the stored interview question that asks essentially the same thing as the current"
+    " message, or \"none\". Candidates came from keyword overlap; match meaning, not generic "
+    "shared words such as \"tell\", \"yourself\" or \"company\". A wrong match is worse than no "
+    "match. Use history only to resolve the current message's references."
 )
 
 _SELECT_EXAMPLE_USER_PROMPT_TEMPLATE = (
@@ -152,25 +151,25 @@ def _topic_history_context(recent_messages: list | None) -> str:
 
 
 class ContextGatherer:
-    def __init__(self, db: AsyncSession = Depends(get_db), gemini_service: GeminiService = Depends(), bm25_service: BM25Service = Depends(), conversation_service: ConversationService = Depends(), readiness_service: ReadinessService | None = None):
+    def __init__(self, db: AsyncSession = Depends(get_db), ai_service: AIService = Depends(get_ai_service), bm25_service: BM25Service = Depends(), conversation_service: ConversationService = Depends(), readiness_service: ReadinessService | None = None):
         """
         Stores the injected database session and service instances.
 
         Parameters:
         - db (AsyncSession): SQLAlchemy async session — injected by FastAPI via get_db, or passed explicitly by ModelCollaborateService
-        - gemini_service (GeminiService): calls the Gemini model — injected by FastAPI, or passed explicitly
+        - ai_service (AIService): calls the selected model — injected by FastAPI, or passed explicitly
         - bm25_service (BM25Service): retrieves similar past questions — injected by FastAPI, or passed explicitly
         - conversation_service (ConversationService): reads conversation state — injected by FastAPI, or passed explicitly
-        - readiness_service (ReadinessService | None): decides whether the pending messages should be answered yet — defaults to one built on the same Gemini service, so the existing four-argument construction (ModelCollaborateService, the probe scripts) keeps working
+        - readiness_service (ReadinessService | None): decides whether the pending messages should be answered yet — defaults to one built on the same AI service, so the existing four-argument construction (ModelCollaborateService, the probe scripts) keeps working
 
         Returns:
-        - None: sets self.db, self.gemini_service, self.bm25_service, self.conversation_service, self.readiness_service
+        - None: sets self.db, self.ai_service, self.bm25_service, self.conversation_service, self.readiness_service
         """
         self.db = db
-        self.gemini_service = gemini_service
+        self.ai_service = ai_service
         self.bm25_service = bm25_service
         self.conversation_service = conversation_service
-        self.readiness_service = readiness_service or ReadinessService(gemini_service)
+        self.readiness_service = readiness_service or ReadinessService(ai_service)
 
     async def gather(self, user_message: str, conversation_id: str, skip_readiness: bool = False, job_context: str | None = None) -> dict:
         """
@@ -211,6 +210,7 @@ class ContextGatherer:
         # progress") or, worse, interleave inside the turn's transaction.
         # Nothing here is parallelised without giving each branch its own
         # session first.
+        self.ai_service.configure(await load_configuration(self.db))
         conversation = await self.conversation_service.get_conversation_unlocked(conversation_id)
         summary = conversation.summary if conversation else None
 
@@ -248,6 +248,9 @@ class ContextGatherer:
         bm25_candidates = await self.bm25_service.find_similar_questions(effective_user_message, top_k=_EXAMPLE_CANDIDATE_COUNT)
 
         candidate_identity, core_personality, prefer_name = await self._get_personality_profile()
+        # The loaded history fields stay in memory (expire_on_commit=False).
+        # End this read transaction before any AI request borrows wall-clock time.
+        await finish_read_phase(self.db)
         db_elapsed = time.perf_counter() - started
 
         # ---- Phase 2: the three model calls, concurrently ------------------
@@ -298,14 +301,13 @@ class ContextGatherer:
             )
         )
         tasks = (readiness_task, topics_task, example_task)
+        for task in tasks:
+            task.add_done_callback(_consume_completion)
         try:
             readiness = await readiness_task
             if readiness["decision"] != RESPOND:
-                # Cancelled, not awaited: these two are HTTP calls that
-                # degrade internally rather than raising, so there is no
-                # result to collect and no exception to retrieve. Waiting for
-                # the cancellation to land would reintroduce the delay this
-                # branch exists to remove.
+                # These results are unused. Completion callbacks observe any
+                # already-raised error without waiting for slow cancellation.
                 topics_task.cancel()
                 example_task.cancel()
                 logger.debug(
@@ -317,14 +319,13 @@ class ContextGatherer:
                     candidate_identity, core_personality, prefer_name, recent_messages, summary,
                 )
 
-            (doc_topic_list, scenario_topic_list), similar_examples = await asyncio.gather(
+            (doc_topic_list, scenario_topic_list), example_selection = await asyncio.gather(
                 topics_task, example_task
             )
         except BaseException:
-            # A cancelled gather already cancels its children, and all three
-            # calls degrade rather than raise -- but if one ever does raise,
-            # the others must not be left running past the turn that owns
-            # them. CancelledError is included deliberately: the whole-turn
+            # Failed required retrieval cancels the remaining calls. They
+            # must not run past the turn that owns them. CancelledError is
+            # included deliberately: the whole-turn
             # deadline in ChatService cancels this coroutine, and the model
             # calls have to stop with it.
             for task in tasks:
@@ -348,7 +349,8 @@ class ContextGatherer:
             "effective_user_message": effective_user_message,
             "pending_messages": pending_messages,
             "evaluated_through": evaluated_through,
-            "similar_examples": similar_examples,
+            "similar_examples": example_selection.examples,
+            "example_failure": example_selection.failure_reason,
             "doc_reference_section": doc_reference_section,
             "scenario_reference_section": scenario_reference_section,
             "doc_topic_list": doc_topic_list,
@@ -363,6 +365,8 @@ class ContextGatherer:
         context["recent_reply_openings"] = await self.conversation_service.get_recent_reply_openings(
             conversation_id
         )
+        # Grounding and generation need these loaded values, not a DB connection.
+        await finish_read_phase(self.db)
         return context
 
     @staticmethod
@@ -530,9 +534,9 @@ class ContextGatherer:
 
     # --- Similar-example re-rank ---
 
-    async def _select_relevant_example(self, candidates: list[dict], recent_messages: list | None, user_message: str, job_context: str | None = None) -> list[dict]:
+    async def _select_relevant_example(self, candidates: list[dict], recent_messages: list | None, user_message: str, job_context: str | None = None) -> ExampleSelection:
         """
-        Asks Gemini which BM25 candidate (if any) matches the current message in meaning, guarding against keyword-overlap false positives.
+        Asks the selected model which BM25 candidate (if any) matches the current message in meaning, guarding against keyword-overlap false positives.
 
         Parameters:
         - candidates (list[dict]): BM25 hits as {question, answer, score}, best-first — comes from gather
@@ -540,10 +544,10 @@ class ContextGatherer:
         - user_message (str): the user's current message — comes from gather
 
         Returns:
-        - list[dict]: the single kept candidate as a one-item list (same shape as before, so PromptBuilder is unchanged), or [] if the model rejects them all — goes to gather as context["similar_examples"]
+        - ExampleSelection: selected examples plus a failure reason, kept distinct from a successful 'none'. Other document evidence may still fully answer the request.
         """
         if not candidates:
-            return []
+            return ExampleSelection()
 
         candidates_str = "\n\n".join(
             f"[{i}] {c['question']}" for i, c in enumerate(candidates)
@@ -563,44 +567,34 @@ class ContextGatherer:
             user_message=user_message
         )
 
-        # Keeping no example is a perfectly good outcome -- it is what the
-        # model is asked to choose whenever nothing genuinely matches -- so a
-        # failed or empty call must degrade to that, not cost the visitor
-        # their reply. The shape checks below were already defensive; this
-        # covers the call itself raising, including GeminiEmptyResponseError
-        # when a safety filter blocks the (entirely benign) re-rank prompt.
+        # Optional examples can be omitted when other evidence is sufficient.
+        # Preserve failures so incomplete evidence cannot become a false gap.
         try:
             with turn_metrics.stage("example"):
-                response = await self.gemini_service.call_model_structured(
-                    model_name=DEFAULT_MODEL,
+                response = await self.ai_service.call_model_structured(
+                    stage="example",
                     user_prompt=user_prompt,
                     system_prompt=_SELECT_EXAMPLE_SYSTEM_PROMPT,
                     schema=schema
                 )
         except Exception:
-            logger.warning(
-                "_select_relevant_example call failed -- continuing with no stored example.",
-                exc_info=True,
-            )
-            return []
+            record_failure("example", "call_failed", "omit_example")
+            return ExampleSelection(failure_reason="call_failed")
 
-        if not isinstance(response, str) or not response.isdigit():
-            if response != "none":
-                logger.debug("_select_relevant_example returned neither a digit index nor 'none'")
-                trace.debug("_select_relevant_example malformed response: %r", response)
-            return []
+        if response == "none":
+            return ExampleSelection()
+        if not isinstance(response, str) or response not in choices:
+            record_failure("example", "invalid_output", "omit_example")
+            return ExampleSelection(failure_reason="invalid_output")
         idx = int(response)
-        if idx < 0 or idx >= len(candidates):
-            logger.debug("_select_relevant_example returned out-of-range index %d for %d candidates", idx, len(candidates))
-            return []
         logger.debug("_select_relevant_example kept [%d] %r out of %d BM25 candidates", idx, candidates[idx]["question"], len(candidates))
-        return [candidates[idx]]
+        return ExampleSelection(examples=[candidates[idx]])
 
     # --- Topic Selection ---
 
     async def _select_relevant_topics(self, doc_topics_data: list[tuple[str, str]], scenario_topics_data: list[tuple[str, str]], history_context: str, user_message: str) -> tuple[list[str], list[str]]:
         """
-        Asks Gemini, in one call, for a focused set of potentially useful document and scenario topics; grounding approves the evidence later.
+        Asks the selected model, in one call, for a focused set of potentially useful document and scenario topics; grounding approves the evidence later.
 
         Parameters:
         - doc_topics_data (list[tuple[str, str]]): (topic, description) pairs for factual document references — comes from _find_topic
@@ -609,7 +603,7 @@ class ContextGatherer:
         - user_message (str): the user's current message — comes from _find_topic
 
         Returns:
-        - tuple[list[str], list[str]]: (doc_topics, scenario_topics), each filtered to topics actually present in its own input list — goes to _find_topic. Returns two empty lists rather than raising when the reply is malformed: no references is a recoverable outcome, since Stage 1 still classifies the question and Stage 2 declines rather than inventing.
+        - tuple[list[str], list[str]]: valid selected topics, including empty lists for a successful no-match. Failed calls or invalid selections raise ModelStageError; they are not evidence of missing candidate information.
         """
         doc_names = [t[0] for t in doc_topics_data]
         scenario_names = [t[0] for t in scenario_topics_data]
@@ -634,48 +628,34 @@ class ContextGatherer:
             user_message=user_message
         )
 
-        # Same reasoning as _select_relevant_example: the docstring already
-        # commits to returning two empty lists rather than raising when the
-        # reply is malformed, because no references is a recoverable outcome --
-        # Stage 1 still classifies the question and Stage 2 declines rather
-        # than inventing. A call that RAISES is the same outcome and must be
-        # handled the same way.
+        # A completed empty search and an unavailable search are different.
+        # No retry or extra model call: use the existing technical-error path.
         try:
             with turn_metrics.stage("topics"):
-                response = await self.gemini_service.call_model_structured(
-                    model_name=DEFAULT_MODEL,
+                response = await self.ai_service.call_model_structured(
+                    stage="topics",
                     user_prompt=user_prompt,
                     system_prompt=_FIND_TOPIC_SYSTEM_PROMPT,
                     schema=schema
                 )
         except Exception:
-            logger.warning(
-                "_select_relevant_topics call failed -- continuing with no reference topics.",
-                exc_info=True,
-            )
-            return [], []
+            raise stage_error("topics", "call_failed") from None
 
         if not isinstance(response, dict):
-            logger.debug("_select_relevant_topics returned no object")
-            trace.debug("_select_relevant_topics malformed response: %r", response)
-            return [], []
+            raise stage_error("topics", "invalid_output")
 
         def keep(key: str, allowed: list[str]) -> list[str]:
-            selected = response.get(key)
-            if not isinstance(selected, list):
-                # Absent is expected for a list left out of the schema above;
-                # present-but-not-a-list is the model ignoring the schema.
-                if allowed:
-                    logger.debug("_select_relevant_topics returned no list for %s", key)
-                    trace.debug("_select_relevant_topics malformed %s: %r", key, selected)
-                return []
-            return [topic for topic in selected if topic in allowed]
+            selected = response.get(key, [] if not allowed else None)
+            if (not isinstance(selected, list)
+                    or any(not isinstance(topic, str) or topic not in allowed for topic in selected)):
+                raise stage_error("topics", "invalid_output")
+            return selected
 
         return keep("document_topics", doc_names), keep("scenario_topics", scenario_names)
 
     async def _find_topic(self, user_message: str, recent_messages: list | None = None) -> tuple[list[str], list[str]]:
         """
-        Asks Gemini which document and scenario topics are relevant to the user's message.
+        Asks the selected model which document and scenario topics are relevant to the user's message.
 
         Parameters:
         - user_message (str): the user's current message — comes from gather

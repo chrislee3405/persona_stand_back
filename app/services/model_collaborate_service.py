@@ -5,9 +5,8 @@ from fastapi import Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.chat_trace import trace
-from app.constants import DEFAULT_MODEL
 from app.database import get_db
-from app.services.ai.gemini_service import GeminiService
+from app.services.ai.provider_factory import AIService, get_ai_service
 from app.services.bm25_service import BM25Service
 from app.services.conversation_manage_service import ConversationService
 from app.services.model_collaborate import turn_metrics
@@ -17,6 +16,7 @@ from app.services.model_collaborate.prompt_builder import PromptBuilder
 from app.services.model_collaborate.readiness_service import RESPOND
 from app.services.model_collaborate.response_gate import ResponseGate, is_fallback_response
 from app.services.model_collaborate.response_parser import ResponseParser
+from app.services.model_collaborate.stage_errors import ModelStageError, stage_error
 from app.services.rate_control_service import RateTier
 
 logger = logging.getLogger(__name__)
@@ -34,9 +34,9 @@ _REGEN_COUNTER: dict[RateTier, int] = {
     "guest": 2,
     "invite": 4,
 }
-# Minimum characters per turn when splitting a response into several message
-# bubbles. Larger value -> fewer, longer turns allowed; smaller value ->
-# more, shorter turns allowed. Tune during testing.
+# Character budget for the display-turn count safety ceiling. This is not a
+# target bubble length or a minimum for each bubble: the splitter chooses
+# boundaries by content and may keep a connected reply in one long message.
 _MIN_CHARS_PER_TURN = 40
 
 
@@ -73,25 +73,25 @@ class TurnOutcome:
 
 
 class ModelCollaborateService:
-    def __init__(self, db: AsyncSession = Depends(get_db), gemini_service: GeminiService = Depends(), bm25_service: BM25Service = Depends(), conversation_service: ConversationService = Depends()):
+    def __init__(self, db: AsyncSession = Depends(get_db), ai_service: AIService = Depends(get_ai_service), bm25_service: BM25Service = Depends(), conversation_service: ConversationService = Depends()):
         """
-        Stores the injected Gemini service (needed directly for _generate_ai_response) and composes the orchestration sub-services from the same injected dependencies.
+        Stores the injected AI service (needed directly for _generate_ai_response) and composes the orchestration sub-services from the same injected dependencies.
 
         Parameters:
         - db (AsyncSession): SQLAlchemy async session — injected by FastAPI via get_db
-        - gemini_service (GeminiService): calls the Gemini model — injected by FastAPI
+        - ai_service (AIService): calls the selected model — injected by FastAPI
         - bm25_service (BM25Service): retrieves similar past questions — injected by FastAPI
         - conversation_service (ConversationService): reads/writes conversation state — injected by FastAPI
 
         Returns:
-        - None: sets self.gemini_service and the five composed sub-services (self.context_gatherer, self.grounding_service, self.prompt_builder, self.response_gate, self.response_parser)
+        - None: sets self.ai_service and the five composed sub-services (self.context_gatherer, self.grounding_service, self.prompt_builder, self.response_gate, self.response_parser)
         """
-        self.gemini_service = gemini_service
-        self.context_gatherer = ContextGatherer(db, gemini_service, bm25_service, conversation_service)
-        self.grounding_service = GroundingService(gemini_service)
+        self.ai_service = ai_service
+        self.context_gatherer = ContextGatherer(db, ai_service, bm25_service, conversation_service)
+        self.grounding_service = GroundingService(ai_service)
         self.prompt_builder = PromptBuilder()
-        self.response_gate = ResponseGate(gemini_service, conversation_service)
-        self.response_parser = ResponseParser(gemini_service, min_chars_per_turn=_MIN_CHARS_PER_TURN)
+        self.response_gate = ResponseGate(ai_service, conversation_service)
+        self.response_parser = ResponseParser(ai_service, min_chars_per_turn=_MIN_CHARS_PER_TURN)
 
     async def model_orchestration(self, user_message: str, conversation_id: str, session_id: str, tier: RateTier, skip_readiness: bool = False, job_context: str | None = None) -> TurnOutcome:
         """
@@ -156,9 +156,25 @@ class ModelCollaborateService:
 
             if grounding.get("_failed"):
                 # Use the existing technical-error path, not a claim that facts are absent.
-                raise RuntimeError("Unable to verify supporting information")
+                raise ModelStageError("grounding", grounding.get("_failure_reason", "invalid_output"))
+            actions = {part["action"] for part in grounding.get("response_parts", [])}
+            if actions == {"decline_demonstration"}:
+                # A pure new exercise needs no generated refusal or invented
+                # experience bridge. Mixed requests still reach the writer.
+                reply = "I can explain my documented project work, but I can't complete a new technical exercise here."
+                return TurnOutcome(
+                    decision=RESPOND, evaluated_through=evaluated_through,
+                    pending_messages=context["pending_messages"],
+                    reply_text=reply, reply_turns=[reply],
+                    doc_topics=context["doc_topic_list"], scenario_topics=context["scenario_topic_list"],
+                )
             facts = [fact for fact in grounding.get("facts", []) if isinstance(fact, str) and fact.strip()]
-            if grounding.get("question_type") == "factual" and not facts:
+            factual_request = grounding.get("question_type") == "factual" or "answer_factual" in actions
+            if context.get("example_failure") and factual_request and (grounding.get("coverage") != "full" or not facts):
+                # An unavailable source cannot establish a gap in the records.
+                # Fully supported replies may proceed without the optional example.
+                raise stage_error("example", context["example_failure"])
+            if grounding.get("question_type") == "factual" and not facts and not actions.difference({"answer_factual"}):
                 missing = grounding.get("missing")
                 subject = " ".join(missing.split())[:300] if isinstance(missing, str) and missing.strip() else "this question"
                 name = context.get("prefer_name") or "Chris"
@@ -182,7 +198,7 @@ class ModelCollaborateService:
             #     the STAGE 2 prompts, so a rejected reply is rewritten against the
             #     same approved facts rather than re-grounded from scratch.
             with turn_metrics.stage("gate"):
-                final_response = await self.response_gate.check(context, effective_message, ai_response, system_prompt, user_prompt, conversation_id, session_id, regen_counter=_REGEN_COUNTER[tier])
+                final_response = await self.response_gate.check({**context, "grounding": grounding}, effective_message, ai_response, system_prompt, user_prompt, conversation_id, session_id, regen_counter=_REGEN_COUNTER[tier])
 
             # 4b. response parsing into several display turns. Skip it for the
             #     response-gate fallback: that's a single system notice (rendered
@@ -212,7 +228,7 @@ class ModelCollaborateService:
 
     async def _generate_reply(self, system_prompt: str, user_prompt: str) -> str:
         """
-        Stage 2: sends the finalized prompts to Gemini and returns the generated reply.
+        Stage 2: sends the finalized prompts to the selected provider and returns the generated reply.
 
         Parameters:
         - system_prompt (str): the system instruction — comes from self.prompt_builder.build_reply
@@ -224,11 +240,16 @@ class ModelCollaborateService:
         trace.debug("reply (stage 2) system prompt: %s", system_prompt)
         trace.debug("reply (stage 2) user prompt: %s", user_prompt)
 
-        final_response = await self.gemini_service.call_model(
-            model_name=DEFAULT_MODEL,
-            user_prompt=user_prompt,
-            system_prompt=system_prompt
-        )
+        try:
+            final_response = await self.ai_service.call_model(
+                stage="reply",
+                user_prompt=user_prompt,
+                system_prompt=system_prompt
+            )
+        except Exception:
+            raise stage_error("reply", "call_failed") from None
+        if not isinstance(final_response, str) or not final_response.strip():
+            raise stage_error("reply", "invalid_output")
 
         trace.debug("reply (stage 2) model response: %s", final_response)
 

@@ -7,6 +7,7 @@ from google import genai
 from google.genai import types
 
 from app.services.model_collaborate import turn_metrics
+from app.services.ai.base import AIProviderError, REQUEST_TIMEOUT_SECONDS, MAX_OUTPUT_TOKENS
 
 # Per-call wall-clock ceiling, milliseconds. Bounds ONE hung Vertex
 # connection; 30s is generous against the ~10s a real turn's slowest call
@@ -14,7 +15,7 @@ from app.services.model_collaborate import turn_metrics
 # sequence, so the per-call ceiling alone allows ~360s. The whole turn is
 # bounded by TURN_DEADLINE_SECONDS (app/constants.py), which is the value
 # that has to stay under nginx's proxy_read_timeout -- not this one.
-_REQUEST_TIMEOUT_MS = 30_000
+_REQUEST_TIMEOUT_MS = REQUEST_TIMEOUT_SECONDS * 1000
 
 # Hard ceiling on generated length, in tokens, applied to every call. This
 # is a COST control, not a quality one: nothing else bounds output size, so
@@ -25,7 +26,7 @@ _REQUEST_TIMEOUT_MS = 30_000
 # malformed/short reply, which every caller already handles -- see
 # GroundingService's GROUND_FALLBACK and ResponseParser's single-turn
 # fallback.
-_MAX_OUTPUT_TOKENS = 2048
+_MAX_OUTPUT_TOKENS = MAX_OUTPUT_TOKENS
 
 # vertexai=True routes through Vertex AI (using this environment's GCP
 # credentials -- Workload Identity Federation in production) rather than the
@@ -57,7 +58,7 @@ def _get_client():
 JSONValue = Union[dict, list, str, int, float, bool, None]
 
 
-class GeminiEmptyResponseError(Exception):
+class GeminiEmptyResponseError(AIProviderError):
     """
     Raised when a Gemini call comes back with no usable text.
 
@@ -110,6 +111,7 @@ def _require_text(response, model_name: str) -> str:
       first thing anyone reading the log will want.
     """
     text = response.text
+    turn_metrics.record_response(text)
     if text:
         return text
 
@@ -174,7 +176,7 @@ class GeminiService:
         Raises:
         - GeminiEmptyResponseError: the model returned no text at all (safety block, truncation). Never returns None despite the SDK being able to.
         """
-        with turn_metrics.model_call(model_name):
+        with turn_metrics.model_call(model_name, provider="gemini"):
             response = await _get_client().aio.models.generate_content(
                 model=model_name,
                 contents=user_prompt,
@@ -203,7 +205,7 @@ class GeminiService:
         - GeminiEmptyResponseError: the model returned no text at all, so there is nothing to parse.
         - json.JSONDecodeError: the model returned text that is not valid JSON (a truncated payload does this). Callers that can degrade already catch broadly; see GroundingService.ground.
         """
-        with turn_metrics.model_call(model_name):
+        with turn_metrics.model_call(model_name, provider="gemini"):
             response = await _get_client().aio.models.generate_content(
                 model=model_name,
                 contents=user_prompt,

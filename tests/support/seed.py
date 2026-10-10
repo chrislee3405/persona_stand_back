@@ -2,6 +2,7 @@
 from sqlalchemy import text
 
 from app.database import Base, SessionLocal, engine
+from app.models.model_configuration import ModelConfiguration
 from app.models.code import InviteCode
 from app.models.consent import ConsentPolicy
 from app.models.prompt_reference import DocReference, PersonalityReference
@@ -25,6 +26,7 @@ async def reset_database():
 async def seed_database():
     async with SessionLocal() as db:
         db.add_all([
+            ModelConfiguration(id=1, is_active=True, provider="gemini", default_model="test-model", summary_model="test-summary"),
             ConsentPolicy(version="test-v1", condition_text=TERMS),
             InviteCode(code=INVITE_CODE, description="Fictional automated test invite"),
             PersonalityReference(legal_name="Test Candidate", prefer_name="Test Candidate", culture_background="Fictional", core_personality="Clear and helpful."),

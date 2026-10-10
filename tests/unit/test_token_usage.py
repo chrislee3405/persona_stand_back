@@ -16,14 +16,18 @@ def record_example():
 async def test_parallel_stages_and_retries_keep_counts_separate():
     async def work(name, count):
         with turn_metrics.stage(name):
-            for _ in range(count):
+            for index in range(count):
                 with turn_metrics.model_call("test-model"):
                     await asyncio.sleep(0)
                     record_example()
+                    turn_metrics.record_response(f"{name}-{index}")
     with turn_metrics.turn() as metrics:
         await asyncio.gather(work("topics", 1), work("gate", 3))
     result = metrics.snapshot(status="respond", kind="message")
     assert result["stages"]["gate"]["calls"] == 3
+    assert [r["response"] for r in result["stages"]["gate"]["requests"]] == ["gate-0", "gate-1", "gate-2"]
+    assert result["stages"]["topics"]["requests"][0]["response"] == "topics-0"
+    assert "gate-0" not in metrics.format()
     assert result["stages"]["topics"]["tokens"]["total_tokens"] == 150
     assert result["total"] == dict(input_tokens=400, output_tokens=80, thinking_tokens=120,
                                   cached_tokens=160, total_tokens=600)
@@ -42,6 +46,7 @@ async def test_sdk_usage_is_recorded_even_when_structured_reply_cannot_be_parsed
     result = metrics.snapshot(status="failed", kind="message")
     request = result["stages"]["grounding"]["requests"][0]
     assert request["status"] == "failed" and request["total_tokens"] == 150
+    assert request["response"] == "invalid json"
     assert "private input" not in str(result)
 
 
@@ -55,6 +60,7 @@ def test_unknown_usage_remains_unknown_and_known_attempt_is_preserved():
     assert result["total"]["total_tokens"] is None
     assert result["stages"]["gate"]["requests"][0]["total_tokens"] == 150
     assert result["stages"]["gate"]["calls"] == 2
+    assert result["stages"]["gate"]["requests"][1]["response"] is None
 
 
 @pytest.mark.parametrize("status", ["respond", "wait", "no_reply", "failed", "timeout"])
@@ -65,6 +71,7 @@ async def test_chat_saves_usage_without_needing_a_reply(status, monkeypatch):
     async def operation():
         with turn_metrics.turn(), turn_metrics.stage("readiness"), turn_metrics.model_call("model"):
             record_example()
+            turn_metrics.record_response("returned model text")
             if status == "failed":
                 raise RuntimeError("failed")
             if status == "timeout":
@@ -81,6 +88,7 @@ async def test_chat_saves_usage_without_needing_a_reply(status, monkeypatch):
     assert args[:2] == ("conv", 4)
     assert args[2]["status"] == status and args[2]["kind"] == "continue"
     assert args[2]["total"]["total_tokens"] == 150
+    assert args[2]["stages"]["readiness"]["requests"][0]["response"] == "returned model text"
 
 
 async def test_logging_failure_does_not_replace_reply():

@@ -38,6 +38,7 @@ class StageMetrics:
     prompt_tokens: int = 0
     output_tokens: int = 0
     requests: list[dict] = field(default_factory=list)
+    failures: list[dict] = field(default_factory=list)
 
     @property
     def total_tokens(self) -> int:
@@ -54,7 +55,7 @@ class TurnMetrics:
     started_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
     def snapshot(self, *, status: str, kind: str) -> dict:
-        """Provider counts only; unknown usage is null, never a fabricated zero."""
+        """Provider counts and returned text; unknown usage remains null."""
         fields = ("input_tokens", "output_tokens", "thinking_tokens", "cached_tokens", "total_tokens")
 
         def totals(requests):
@@ -66,7 +67,8 @@ class TurnMetrics:
             "run_id": self.run_id, "started_at": self.started_at, "kind": kind,
             "status": status, "decision": self.decision,
             "stages": {name: {"seconds": round(stage.seconds, 4), "calls": len(stage.requests),
-                              "tokens": totals(stage.requests), "requests": [dict(r) for r in stage.requests]}
+                              "tokens": totals(stage.requests), "requests": [dict(r) for r in stage.requests],
+                              **({"failures": [dict(f) for f in stage.failures]} if stage.failures else {})}
                        for name, stage in self.stages.items()},
             "total": totals(requests),
         }
@@ -181,14 +183,17 @@ def record_usage(prompt_tokens: int | None, output_tokens: int | None, *, thinki
 
 
 @contextmanager
-def model_call(model: str):
+def model_call(model: str, *, provider: str | None = None):
     """Count each application call, including retries and calls that fail without usage."""
     metrics, name = _current.get(), _current_stage.get()
     if metrics is None or name is None:
         yield
         return
     request = {"model": model, "status": "failed", "input_tokens": None, "output_tokens": None,
-               "thinking_tokens": None, "cached_tokens": None, "total_tokens": None}
+               "thinking_tokens": None, "cached_tokens": None, "total_tokens": None,
+               "response": None}
+    if provider is not None:
+        request["provider"] = provider
     metrics.stage(name).calls += 1
     metrics.stage(name).requests.append(request)
     token = _current_call.set(request)
@@ -199,6 +204,19 @@ def model_call(model: str):
     finally:
         request["seconds"] = round(time.perf_counter() - started, 4)
         _current_call.reset(token)
+
+
+def record_response(response: str | None, *, refusal: str | None = None) -> None:
+    """Keep returned model text before parsing/validation, without logging it.
+
+    Structured output stays as raw JSON text so malformed or truncated output
+    is available for diagnosis. A request with no returned text remains null.
+    """
+    request = _current_call.get()
+    if request is not None:
+        request["response"] = response if isinstance(response, str) else None
+        if isinstance(refusal, str):
+            request["refusal"] = refusal
 
 
 def set_decision(decision: str) -> None:
@@ -214,3 +232,10 @@ def set_decision(decision: str) -> None:
     metrics = _current.get()
     if metrics is not None:
         metrics.decision = decision
+
+
+def record_failure(name: str, *, reason: str, fallback: str) -> None:
+    """Attach content-free stage outcomes to the existing usage record, no new row."""
+    metrics = _current.get()
+    if metrics is not None:
+        metrics.stage(name).failures.append({"reason": reason, "fallback": fallback})

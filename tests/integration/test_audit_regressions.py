@@ -137,9 +137,13 @@ async def test_cursor_migration_is_required_for_startup_and_readiness(client):
     assert (await client.get('/api/health/ready')).status_code == 200
 
 
-async def test_exception_handler_never_logs_or_copies_sql_parameters(consented_client, fake_gemini, caplog, db):
+async def test_exception_handler_never_logs_or_copies_sql_parameters(consented_client, monkeypatch, caplog, db):
     canary = 'fictional-private-sql-canary'
-    fake_gemini.failure = IntegrityError('INSERT fictional', (canary,), Exception(canary))
+    # Inject at the database boundary. AI-call failures now become a safe
+    # ModelStageError, which would no longer exercise SQL exception handling.
+    async def failed_read(*args, **kwargs):
+        raise IntegrityError('SELECT fictional', (canary,), Exception(canary))
+    monkeypatch.setattr(ConversationService, 'get_recent_messages', failed_read)
     with caplog.at_level(logging.ERROR):
         response = await consented_client.post('/api/guestchat', json={'text': 'Describe the project.'})
     assert response.status_code == 200
