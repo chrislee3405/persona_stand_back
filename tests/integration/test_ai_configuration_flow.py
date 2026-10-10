@@ -110,15 +110,24 @@ async def test_seed_adds_presets_without_overwriting_existing_selection(db):
     assert (await load_configuration(db)).provider == "openai"
 
 
-async def test_fresh_seed_has_two_providers_and_one_active(db):
+async def test_fresh_seed_enables_both_providers_with_stage_selection(db):
     from sqlalchemy import delete
     from app.models.seed.load import _load_model_configuration
     from app.services.ai.configuration import load_configuration
     await db.execute(delete(ModelConfiguration))
     assert await _load_model_configuration(db, False) == 2
     await db.commit()
-    assert (await load_configuration(db)).provider == "openai"
-    gemini = await db.scalar(select(ModelConfiguration).where(ModelConfiguration.provider == "gemini"))
+    rows = {row.provider: row for row in (await db.scalars(select(ModelConfiguration))).all()}
+    assert set(rows) == {"gemini", "openai"}
+    assert all(row.is_active for row in rows.values())
+    assert rows["gemini"].use_priority == 1
+    assert rows["openai"].use_priority == 2
+    gemini = rows["gemini"]
     assert gemini.default_model == "gemini-3.5-flash-lite"
     assert gemini.summary_model == "gemini-2.5-flash"
-    assert not gemini.is_active
+    selection = await load_configuration(db)
+    assert selection.provider == "gemini"
+    for stage in ("readiness", "topics", "grounding", "reply", "regeneration", "gate", "split"):
+        assert selection.selection_for(stage) == ("gemini", "gemini-3.5-flash-lite")
+    assert selection.selection_for("summary") == ("gemini", "gemini-2.5-flash")
+    assert selection.selection_for("example") == ("openai", "gpt-4.1-mini")
