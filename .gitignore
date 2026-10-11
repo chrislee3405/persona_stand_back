@@ -52,4 +52,7 @@ app/models/seed/*.json
 
 # CI image receipt and Python publication checks
 image.json
+
+# Generated seed synchronization contains private content and invite codes.
+seed-sync*.sql
 __pycache__/

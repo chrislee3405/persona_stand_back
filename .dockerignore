@@ -57,3 +57,4 @@ backups/
 exports/
 audit/
 output/
+seed-sync*.sql

@@ -35,6 +35,65 @@ To manually load newly added seed records into an already running local stack:
 docker compose exec backend python -m app.models.seed.load
 ```
 
+## Explicit synchronization of all seed files to RDS
+
+The normal loader skips existing records. To make seed values overwrite matching
+records, generate a separate SQL file from the current local JSON files:
+
+```bash
+python -m app.models.seed.load --dry-run
+python scripts/export_seed_sync_sql.py --output seed-sync.sql
+```
+
+The exporter never connects to a database. `seed-sync.sql` contains private seed
+content and invite codes, and is excluded from Git and Docker builds. Regenerate
+it whenever the JSON files change; exporting does not modify RDS.
+
+Take an RDS backup and apply required schema migrations first. In the EC2 `~/app`
+directory, stop the backend while syncing to prevent an in-flight BM25 rebuild
+from persisting an old question corpus:
+
+```bash
+docker compose --env-file .env --env-file release-images.env -f docker-compose.ec2.yml stop backend
+```
+
+In pgAdmin, select the intended RDS database, open **Query Tool**, load the generated
+SQL file, and execute the entire file (including `BEGIN` and `COMMIT`). Alternatively,
+after transferring the generated file to a trusted machine with `psql`, run
+`psql -h <RDS_ENDPOINT> -p 5432 -U <DB_USER> -d <DB_NAME> -W -v ON_ERROR_STOP=1 -f seed-sync.sql`.
+Use your configured RDS TLS settings. If any statement fails, the whole transaction
+is rolled back; in pgAdmin run `ROLLBACK;` before correcting the failure and retrying.
+
+After a successful commit, start the existing backend container on EC2:
+
+```bash
+docker compose --env-file .env --env-file release-images.env -f docker-compose.ec2.yml start backend
+```
+
+Check `/api/health/ready` and a new conversation. The SQL clears `corpus_cache`
+inside the same transaction; the next question lookup rebuilds it from the current
+question bank. No corpus files need deleting.
+
+Synchronization rules:
+
+- Site sections, journey/project details and media slots add a new version only
+  when their newest stored value differs. Earlier versions remain as history.
+- Documents match `document_topic`; scenarios match `scenario_topic`; invite codes
+  match `code`; consent policies match `version`; AI settings match `provider`.
+- The single personality row is updated; an empty table gets the seed owner.
+  Multiple existing personality rows stop the transaction instead of guessing.
+- Questions match exact `question` text; matching answers are overwritten and
+  new questions are inserted. Changed wording creates a new question and keeps
+  the old one, because these seeds have no stable question IDs.
+- Records absent from seed files are retained. Existing provider rows absent from
+  the seed remain enabled/disabled as before; a conflicting enabled priority
+  stops and rolls back the sync rather than changing an unrelated provider.
+
+This all-file operation intentionally replaces matching provider settings and
+consent-policy wording. Historical consent records retain their recorded text,
+but existing agreements refer to the same policy version. For a new policy that
+requires renewed consent, introduce a new version rather than overwriting it.
+
 ## Why this exists
 
 Two reasons, one of which used to be a bug.
